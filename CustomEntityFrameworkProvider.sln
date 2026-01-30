@@ -1,0 +1,34 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CustomMemoryEFProvider.Samples", "CustomMemoryEFProvider.Samples\CustomMemoryEFProvider.Samples.csproj", "{1EFA9317-DCA4-4F7E-901F-AB7C1DD7909A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CustomMemoryEFProvider.Core", "CustomMemoryEFProvider.Core\CustomMemoryEFProvider.Core.csproj", "{86D3DBD3-3D29-4F14-8E3C-B80469AE4286}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CustomMemoryEFProvider", "CustomMemoryEFProvider\CustomMemoryEFProvider.csproj", "{8F661CD3-7E35-4F7C-B563-6B9DCAC9CD1E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CustomMemoryEFProvider.Tests", "CustomMemoryEFProvider.Tests\CustomMemoryEFProvider.Tests.csproj", "{00905B3E-3C20-452B-BB25-25FFA1C32FAB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1EFA9317-DCA4-4F7E-901F-AB7C1DD7909A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1EFA9317-DCA4-4F7E-901F-AB7C1DD7909A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1EFA9317-DCA4-4F7E-901F-AB7C1DD7909A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1EFA9317-DCA4-4F7E-901F-AB7C1DD7909A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{86D3DBD3-3D29-4F14-8E3C-B80469AE4286}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{86D3DBD3-3D29-4F14-8E3C-B80469AE4286}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{86D3DBD3-3D29-4F14-8E3C-B80469AE4286}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{86D3DBD3-3D29-4F14-8E3C-B80469AE4286}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8F661CD3-7E35-4F7C-B563-6B9DCAC9CD1E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8F661CD3-7E35-4F7C-B563-6B9DCAC9CD1E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8F661CD3-7E35-4F7C-B563-6B9DCAC9CD1E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8F661CD3-7E35-4F7C-B563-6B9DCAC9CD1E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{00905B3E-3C20-452B-BB25-25FFA1C32FAB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{00905B3E-3C20-452B-BB25-25FFA1C32FAB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{00905B3E-3C20-452B-BB25-25FFA1C32FAB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{00905B3E-3C20-452B-BB25-25FFA1C32FAB}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
