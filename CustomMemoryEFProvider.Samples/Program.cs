@@ -38,7 +38,8 @@ try
     // EfProviderIncludeReferenceSmokeTest.Run(sp);
     // EfProviderIncludeCollectionSmokeTest.Run(sp);
     // EfProviderIncludeNestedSmokeTest.Run(sp);
-    IdentityResolutionProblemSmokeTest.Run(sp);
+    // IdentityResolutionProblemSmokeTest.Run(sp);
+    QueryRowsSmokeTest.Run(sp);
 }
 catch (Exception e)
 {

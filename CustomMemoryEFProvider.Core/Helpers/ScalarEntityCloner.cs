@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Reflection;
+using CustomMemoryEFProvider.Core.Diagnostics;
 using CustomMemoryEFProvider.Core.Implementations;
 
 namespace CustomMemoryEFProvider.Core.Helpers;
@@ -87,6 +88,7 @@ public static class ScalarEntityCloner
 
     public static T MaterializeFromSnapshot<T>(ScalarSnapshot snap) where T : class
     {
+        ProviderDiagnostics.MaterializeCalled++;
         var type = typeof(T);
         var props = GetScalarProps(type);
 

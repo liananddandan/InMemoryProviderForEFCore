@@ -1,10 +1,13 @@
 using System.Collections;
+using CustomMemoryEFProvider.Core.Diagnostics;
 using CustomMemoryEFProvider.Core.Enums;
 using CustomMemoryEFProvider.Core.Exceptions;
 using CustomMemoryEFProvider.Core.Helpers;
 using CustomMemoryEFProvider.Core.Interfaces;
 
 namespace CustomMemoryEFProvider.Core.Implementations;
+
+public readonly record struct SnapshotRow(object[] Key, ScalarSnapshot Snapshot);
 
 /// <summary>
 /// In-memory table implementation using Dictionary for storage (supports composite primary keys)
@@ -15,11 +18,12 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
     /// <summary>
     /// Stores entities indexed by their primary key values (supports composite keys via object array)
     /// </summary>
-    private readonly Dictionary<object[], ScalarSnapshot> _committedData 
+    private readonly Dictionary<object[], ScalarSnapshot> _committedData
         = new(ArrayComparer.Instance);
-    private readonly Dictionary<object[], (ScalarSnapshot, EntityState State)> _pendingChanges 
+
+    private readonly Dictionary<object[], (ScalarSnapshot, EntityState State)> _pendingChanges
         = new(ArrayComparer.Instance);
-    
+
     private readonly Type _entityType;
 
     /// <summary>
@@ -37,51 +41,76 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
         }
     }
 
-    /// <inheritdoc/>
-    public IQueryable<TEntity> Query
+    public IQueryable<SnapshotRow> QueryRows
     {
         get
         {
-            var committedEntities = _committedData.ToList();
-            foreach (var (key, (snap, state)) in _pendingChanges)
+            ProviderDiagnostics.QueryRowsCalled++;
+            // start from committed
+            var rows = _committedData
+                .Select(kv => new SnapshotRow(kv.Key, kv.Value))
+                .ToList();
+
+            // merge pending changes
+            foreach (var (key, pending) in _pendingChanges)
             {
+                var (snap, state) = pending;
+
                 switch (state)
                 {
                     case EntityState.Added:
-                        committedEntities.Add(new KeyValuePair<object[], ScalarSnapshot>(key, snap));
+                        rows.Add(new SnapshotRow(key, snap!));
                         break;
+
                     case EntityState.Deleted:
-                        committedEntities.RemoveAll(kv => ArrayComparer.Instance.Equals(kv.Key, snap));
+                        rows.RemoveAll(r => ArrayComparer.Instance.Equals(r.Key, key));
                         break;
+
                     case EntityState.Modified:
-                        var idx = committedEntities.FindIndex(kv => ArrayComparer.Instance.Equals(kv.Key, key));
+                    {
+                        var idx = rows.FindIndex(r => ArrayComparer.Instance.Equals(r.Key, key));
                         if (idx >= 0)
-                            committedEntities[idx] = new KeyValuePair<object[], ScalarSnapshot>(key, snap);
+                            rows[idx] = new SnapshotRow(key, snap!);
+                        else
+                            rows.Add(new SnapshotRow(key, snap!)); // be tolerant
                         break;
+                    }
                 }
             }
-            return committedEntities
-                .Select(kv => ScalarEntityCloner.MaterializeFromSnapshot<TEntity>(kv.Value))
-                .AsQueryable();
+
+            return rows.AsQueryable();
         }
     }
 
     /// <inheritdoc/>
+    [Obsolete("Do not use in provider pipeline. Use QueryRows and let EF Core materialize entities.")]
+    public IQueryable<TEntity> Query {
+        get
+        {
+            ProviderDiagnostics.QueryCalled++;
+            return QueryRows.Select(r
+                => ScalarEntityCloner.MaterializeFromSnapshot<TEntity>(r.Snapshot)).AsQueryable();
+        }
+    }
+
+/// <inheritdoc/>
     public void Add(TEntity entity)
     {
         if (entity == null) throw new ArgumentNullException(nameof(entity), "Entity cannot be null.");
-        
+
         var keyValues = PrimaryKeyHelper.ExtractPrimaryKeyValues(entity, _entityType);
         if (_committedData.ContainsKey(keyValues))
         {
-            throw new MemoryDatabaseException($"Entity with key [{string.Join(",", keyValues)}] already exists in committed data");
+            throw new MemoryDatabaseException(
+                $"Entity with key [{string.Join(",", keyValues)}] already exists in committed data");
         }
-        
-        if (_pendingChanges.ContainsKey(keyValues) && 
-            (_pendingChanges[keyValues].State == EntityState.Added 
+
+        if (_pendingChanges.ContainsKey(keyValues) &&
+            (_pendingChanges[keyValues].State == EntityState.Added
              || _pendingChanges[keyValues].State == EntityState.Modified))
         {
-            throw new MemoryDatabaseException($"Entity with key [{string.Join(",", keyValues)}] is already pending addition/modification");
+            throw new MemoryDatabaseException(
+                $"Entity with key [{string.Join(",", keyValues)}] is already pending addition/modification");
         }
 
         var snap = ScalarEntityCloner.ExtractSnapshot(entity);
@@ -100,24 +129,15 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
 
         // Check if entity exists in the table
         var existsInCommitted = _committedData.ContainsKey(keyValues);
-        var existsInPendingAdded = _pendingChanges.ContainsKey(keyValues) && 
-                                   (_pendingChanges[keyValues].State == EntityState.Added || 
-                                    _pendingChanges[keyValues].State == EntityState.Modified);
+        var existsInPending = _pendingChanges.TryGetValue(keyValues, out var pending) &&
+                              pending.State != EntityState.Deleted;
 
-        if (!existsInCommitted && !existsInPendingAdded)
+        if (!existsInCommitted && !existsInPending)
         {
-            Console.WriteLine($"[Update MISS] entityType={_entityType.FullName}");
-            Console.WriteLine($"[Update MISS] incoming key = {string.Join(",", keyValues.Select(v => $"{v}({v?.GetType().Name ?? "null"})"))}");
-
-            Console.WriteLine($"[Update MISS] committed keys count = {_committedData.Count}");
-            foreach (var k in _committedData.Keys)
-            {
-                Console.WriteLine($"  committed key = {string.Join(",", k.Select(v => $"{v}({v?.GetType().Name ?? "null"})"))} " +
-                                  $" equalsIncoming={ArrayComparer.Instance.Equals(k, keyValues)}");
-            }
-            throw new KeyNotFoundException($"Entity with key [{string.Join(",", keyValues)}] not found (cannot update non-existent entity)");
+            throw new KeyNotFoundException(
+                $"Entity with key [{string.Join(",", keyValues)}] not found (cannot update non-existent entity)");
         }
-        
+
         var snap = ScalarEntityCloner.ExtractSnapshot(entity);
         // Update the entity (replace the value for the existing key)
         _pendingChanges[keyValues] = (snap, EntityState.Modified);
@@ -135,17 +155,21 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
 
         // Check if entity exists in the table
         var existsInCommitted = _committedData.ContainsKey(keyValues);
-        var existsInPending = _pendingChanges.ContainsKey(keyValues) && 
-                              (_pendingChanges[keyValues].State == EntityState.Added || _pendingChanges[keyValues].State == EntityState.Modified);
+        var existsInPending = _pendingChanges.TryGetValue(keyValues, out var pending) &&
+                              pending.State != EntityState.Deleted;
+        
         if (!existsInCommitted && !existsInPending)
         {
-            throw new KeyNotFoundException($"Entity with key [{string.Join(",", keyValues)}] not found (cannot delete non-existent entity)");
+            throw new KeyNotFoundException(
+                $"Entity with key [{string.Join(",", keyValues)}] not found (cannot delete non-existent entity)");
         }
-        
-        _pendingChanges[keyValues] = (new ScalarSnapshot() {Values = Array.Empty<object?>()}, EntityState.Deleted);
+
+        _pendingChanges[keyValues] = (null, EntityState.Deleted);
     }
 
     /// <inheritdoc/>
+    /// Find returns a materialized entity. This is NOT used for query pipeline,
+    /// but is useful for internal lookups.
     public TEntity? Find(object[] keyValues)
     {
         if (keyValues == null) throw new ArgumentNullException(nameof(keyValues));
@@ -154,12 +178,14 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
             if (pending.State == EntityState.Deleted) return null;
             return ScalarEntityCloner.MaterializeFromSnapshot<TEntity>(pending.Item1);
         }
- 
+
         if (_committedData.TryGetValue(keyValues, out var snap))
             return ScalarEntityCloner.MaterializeFromSnapshot<TEntity>(snap);
 
         return null;
     }
+
+    object? IMemoryTable.Find(object[] keyValues) => Find(keyValues);
 
     public Type EntityType { get; }
 
@@ -185,8 +211,10 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
                     break;
             }
         }
+
         _pendingChanges.Clear();
-        Console.WriteLine($"[Table SaveChanges] tableType={_entityType.FullName} this={GetHashCode()} committedAfter={_committedData.Count}");
+        Console.WriteLine(
+            $"[Table SaveChanges] tableType={_entityType.FullName} this={GetHashCode()} committedAfter={_committedData.Count}");
 
         return changedCount;
     }
@@ -197,15 +225,10 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
         _pendingChanges.Clear();
     }
 
-    object? IMemoryTable.Find(object[] keyValues)
-    {
-        return Find(keyValues);
-    }
-
     public void Dispose()
     {
         Clear();
     }
 
-    IEnumerable IMemoryTable.GetAllEntities() => Query;
+    IEnumerable IMemoryTable.GetAllEntities() => QueryRows;
 }
