@@ -8,15 +8,18 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitorFactory
 {
     private readonly ShapedQueryCompilingExpressionVisitorDependencies _deps;
     private readonly IMemoryDatabase _db;
+    private readonly SnapshotValueBufferFactory _vbFactory;
 
     public CustomMemoryShapedQueryCompilingExpressionVisitorFactory(
         ShapedQueryCompilingExpressionVisitorDependencies deps,
-        IMemoryDatabase db)
+        IMemoryDatabase db,
+        SnapshotValueBufferFactory vbFactory)
     {
         _deps = deps;
         _db = db;
+        _vbFactory = vbFactory;
     }
 
     public ShapedQueryCompilingExpressionVisitor Create(QueryCompilationContext queryCompilationContext)
-        => new CustomMemoryShapedQueryCompilingExpressionVisitor(_deps, queryCompilationContext, _db);
+        => new CustomMemoryShapedQueryCompilingExpressionVisitor(_deps, queryCompilationContext, _db, _vbFactory);
 }

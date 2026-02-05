@@ -85,12 +85,7 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
     /// <inheritdoc/>
     [Obsolete("Do not use in provider pipeline. Use QueryRows and let EF Core materialize entities.")]
     public IQueryable<TEntity> Query {
-        get
-        {
-            ProviderDiagnostics.QueryCalled++;
-            return QueryRows.Select(r
-                => ScalarEntityCloner.MaterializeFromSnapshot<TEntity>(r.Snapshot)).AsQueryable();
-        }
+        get => throw new NotSupportedException("Query is disabled. Provider must use QueryRows only.");
     }
 
 /// <inheritdoc/>

@@ -1,4 +1,5 @@
 using System.Collections;
+using CustomMemoryEFProvider.Core.Implementations;
 
 namespace CustomMemoryEFProvider.Core.Interfaces;
 
@@ -8,6 +9,8 @@ namespace CustomMemoryEFProvider.Core.Interfaces;
 /// <typeparam name="TEntity">Type of the entity stored in the table</typeparam>
 public interface IMemoryTable<TEntity> : IMemoryTable where TEntity : class
 {
+    IQueryable<SnapshotRow> QueryRows { get; }
+
     /// <summary>
     /// Gets all entities in the table as queryable (supports LINQ)
     /// </summary>

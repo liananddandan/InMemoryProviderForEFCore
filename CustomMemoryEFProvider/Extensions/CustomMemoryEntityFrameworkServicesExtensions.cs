@@ -24,7 +24,9 @@ public static class CustomMemoryEntityFrameworkServicesExtensions
     {
         // 校验入参（对齐官方 Provider 写法）
         ArgumentNullException.ThrowIfNull(serviceCollection, nameof(serviceCollection));
-
+        // NEW: register SnapshotValueBufferFactory for compiling visitor factory
+        serviceCollection.TryAddSingleton<SnapshotValueBufferFactory>();
+        
         // ========== 第一步：注册 EF Core 框架级核心服务 ==========
         var builder = new EntityFrameworkServicesBuilder(serviceCollection);
         

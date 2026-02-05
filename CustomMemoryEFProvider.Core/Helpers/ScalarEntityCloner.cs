@@ -80,10 +80,10 @@ public static class ScalarEntityCloner
     {
         var type = source.GetType();
         var props = GetScalarProps(type);
-        var values = new object?[props.Length];
-        for (int i = 0; i < props.Length; i++)
-            values[i] = props[i].GetValue(source);
-        return new ScalarSnapshot { Values = values };
+        var dict = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var p in props)
+            dict[p.Name] = p.GetValue(source);
+        return new ScalarSnapshot { ValuesByName = dict };
     }
 
     public static T MaterializeFromSnapshot<T>(ScalarSnapshot snap) where T : class
@@ -93,8 +93,31 @@ public static class ScalarEntityCloner
         var props = GetScalarProps(type);
 
         var obj = (T)Activator.CreateInstance(type)!;
-        for (int i = 0; i < props.Length; i++)
-            props[i].SetValue(obj, snap.Values[i]);
+        foreach (var p in props)
+        {
+            if (!p.CanWrite) continue;
+
+            if (snap.ValuesByName.TryGetValue(p.Name, out var v))
+            {
+                // 可选：简单类型转换保护（避免 int? / int 等差异）
+                if (v != null && !p.PropertyType.IsInstanceOfType(v))
+                {
+                    // 只处理常见可转换场景
+                    var targetType = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
+                    try
+                    {
+                        v = Convert.ChangeType(v, targetType);
+                    }
+                    catch
+                    {
+                        // 不强行转，直接让 SetValue 抛出更清晰（或你也可以自己抛）
+                    }
+                }
+
+                p.SetValue(obj, v);
+            }
+            // 没有该字段就保持默认值
+        }
 
         return obj;
     }

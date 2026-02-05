@@ -1,67 +1,43 @@
 using System.Linq.Expressions;
-using System.Reflection;
-using CustomMemoryEFProvider.Core.Interfaces;
+using Microsoft.EntityFrameworkCore.Query;
+using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace CustomMemoryEFProvider.Infrastructure.Query;
 
-/// <summary>
-/// Rewrites EF Core's EntityQueryRootExpression into our in-memory table IQueryable.
-/// Otherwise expression compilation fails with "must be reducible node".
-/// </summary>
+// Replaces EF's EntityQueryRootExpression (ctx.Set<T> root) with provider queryable source.
 public sealed class EntityQueryRootRewritingVisitor : ExpressionVisitor
 {
-    private readonly IMemoryDatabase _db;
+    private readonly Func<Type, QueryContext, IEntityType, IQueryable> _rootFactory;
+    private readonly ParameterExpression _qcParam;
 
-    public EntityQueryRootRewritingVisitor(IMemoryDatabase db)
+    public EntityQueryRootRewritingVisitor(Func<Type, QueryContext, IEntityType, IQueryable> rootFactory)
     {
-        _db = db;
+        _rootFactory = rootFactory;
+        _qcParam = QueryCompilationContext.QueryContextParameter; // reuse EF param
     }
 
     protected override Expression VisitExtension(Expression node)
     {
-        // EF Core internal query root:
-        // Microsoft.EntityFrameworkCore.Query.EntityQueryRootExpression
-        if (node != null && node.GetType().FullName == "Microsoft.EntityFrameworkCore.Query.EntityQueryRootExpression")
+        if (node is EntityQueryRootExpression eqr)
         {
-            // Try get EntityType / IEntityType (metadata) then its ClrType
-            var entityTypeObj =
-                node.GetType().GetProperty("EntityType")?.GetValue(node)
-                ?? node.GetType().GetField("EntityType")?.GetValue(node);
+            var et = eqr.EntityType;
+            var clrType = et.ClrType;
 
-            if (entityTypeObj == null)
-                throw new NotSupportedException("EntityQueryRootExpression.EntityType is missing.");
+            // Call rootFactory(clrType, qc, et) at runtime.
+            var invoke = _rootFactory.GetType().GetMethod("Invoke")!;
 
-            var clrType =
-                entityTypeObj.GetType().GetProperty("ClrType")?.GetValue(entityTypeObj) as Type
-                ?? entityTypeObj.GetType().GetField("ClrType")?.GetValue(entityTypeObj) as Type
-                ?? throw new NotSupportedException("EntityType.ClrType is missing.");
+            var call = Expression.Call(
+                Expression.Constant(_rootFactory),
+                invoke,
+                Expression.Constant(clrType, typeof(Type)),
+                _qcParam,
+                Expression.Constant(et, typeof(IEntityType)));
 
-            return BuildTableQueryExpression(clrType);
+            // ✅ IMPORTANT: make the expression type IQueryable<T> not IQueryable
+            var typedQueryableType = typeof(IQueryable<>).MakeGenericType(clrType);
+            return Expression.Convert(call, typedQueryableType);
         }
 
         return base.VisitExtension(node);
-    }
-
-    private Expression BuildTableQueryExpression(Type clrType)
-    {
-        // _db.GetTable<TEntity>(Type) -> IMemoryTable<TEntity>
-        var getTableOpen = _db.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-            .Single(m =>
-                m.Name == "GetTable"
-                && m.IsGenericMethodDefinition
-                && m.GetGenericArguments().Length == 1
-                && m.GetParameters().Length == 1);
-
-        var getTable = getTableOpen.MakeGenericMethod(clrType);
-
-        var tableExpr = Expression.Call(
-            Expression.Constant(_db),
-            getTable,
-            Expression.Constant(clrType, typeof(Type)));
-
-        var queryProp = tableExpr.Type.GetProperty("Query")
-                        ?? throw new InvalidOperationException($"IMemoryTable<{clrType.Name}> has no Query property.");
-
-        return Expression.Property(tableExpr, queryProp); // IQueryable<TEntity>
     }
 }
