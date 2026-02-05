@@ -8,5 +8,5 @@ public class BlogPost
     public int BlogId { get; set; }
     public Blog? Blog { get; set; }
     
-    public List<PostComment>? Comments { get; set; }
+    public List<PostComment>? Comments { get; set; } = new List<PostComment>();
 }

@@ -39,7 +39,7 @@ try
     // EfProviderIncludeCollectionSmokeTest.Run(sp);
     // EfProviderIncludeNestedSmokeTest.Run(sp);
     // IdentityResolutionProblemSmokeTest.Run(sp);
-    // QueryRowsSmokeTest.Run(sp);
+    QueryRowsSmokeTest.Run(sp);
 }
 catch (Exception e)
 {

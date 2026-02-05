@@ -108,7 +108,8 @@ public static class QueryRowsSmokeTest
                 throw new Exception("Identity resolution failed: instances not reused within same DbContext.");
 
             if (hit2 != 2 || miss2 != 0 || st2 != 0)
-                throw new Exception("Expected second query to hit identity map only (Hit=2, Miss=0, StartTrackingDelta=0).");
+                throw new Exception(
+                    "Expected second query to hit identity map only (Hit=2, Miss=0, StartTrackingDelta=0).");
 
             // 再用 Single 验证同一个 key 返回同一个引用（加固）
             var id1 = q1[0].Id;
@@ -125,6 +126,84 @@ public static class QueryRowsSmokeTest
                 throw new Exception("Expected tracked entries to be Unchanged (from query).");
 
             Console.WriteLine("✅ EF Core identity map takeover verified (StartTracking + identity hits).");
+        }
+
+        // ---------- Act #3: Relationship Fixup (ordering matters) ----------
+        using (var fxScope = rootProvider.CreateScope())
+        {
+            var ctx = fxScope.ServiceProvider.GetRequiredService<AppDbContext>();
+            ctx.ChangeTracker.Clear();
+
+            var tag = Guid.NewGuid().ToString("N");
+
+            // Seed
+            var blog = new Blog { Name = "B_" + tag };
+            ctx.Add(blog);
+            ctx.SaveChanges();
+
+            var p1 = new BlogPost { Title = "P1_" + tag, BlogId = blog.Id };
+            var p2 = new BlogPost { Title = "P2_" + tag, BlogId = blog.Id };
+            ctx.AddRange(p1, p2);
+            ctx.SaveChanges();
+
+            var detail = new BlogDetail { Description = "D_" + tag, BlogId = blog.Id };
+            ctx.Add(detail);
+            ctx.SaveChanges();
+
+            var c1 = new PostComment { Content = "C1_" + tag, BlogPostId = p1.Id };
+            var c2 = new PostComment { Content = "C2_" + tag, BlogPostId = p1.Id };
+            var c3 = new PostComment { Content = "C3_" + tag, BlogPostId = p2.Id };
+            var c4 = new PostComment { Content = "C4_" + tag, BlogPostId = p2.Id };
+            ctx.AddRange(c1, c2, c3, c4);
+            ctx.SaveChanges();
+
+            // 重新开始：只测试“query 导致的 tracking + fixup”
+            ctx.ChangeTracker.Clear();
+
+            // Phase A: 先查 comments（posts 还没 tracked）=> Comment.Post 应该是 null
+            var commentsA = ctx.Set<PostComment>()
+                .Where(x => x.BlogPostId == p1.Id || x.BlogPostId == p2.Id)
+                .OrderBy(x => x.Id)
+                .ToList();
+
+            if (commentsA.Any(c => c.Post != null))
+                throw new Exception("Fixup PhaseA unexpected: Comment.Post should be null before BlogPost is tracked.");
+
+            Console.WriteLine("[Fixup PhaseA] OK (comments only => Comment.Post null)");
+
+            // Phase B: 再查 posts（posts tracked 后）=> Comment.Post 应该被 fixup，且 BlogPost.Comments 也应被填充
+            var postsB = ctx.Set<BlogPost>()
+                .Where(x => x.BlogId == blog.Id)
+                .OrderBy(x => x.Id)
+                .ToList();
+
+            if (commentsA.Any(c => c.Post == null))
+                throw new Exception("Fixup PhaseB failed: Comment.Post still null after BlogPost is tracked.");
+
+            // 如果你要验证 collection fixup，必须保证 BlogPost.Comments 不是 null（建议实体里初始化）
+            var p1Tracked = postsB.Single(x => x.Id == p1.Id);
+            var p2Tracked = postsB.Single(x => x.Id == p2.Id);
+
+            if (p1Tracked.Comments.Count != 2 || p2Tracked.Comments.Count != 2)
+                throw new Exception(
+                    $"Fixup PhaseB failed: expected 2 comments per post, got p1={p1Tracked.Comments.Count}, p2={p2Tracked.Comments.Count}.");
+
+            Console.WriteLine("[Fixup PhaseB] OK (posts tracked => comment<->post fixup done)");
+
+            // Phase C: 最后查 Blog + Detail，验证 BlogDetail<->Blog，BlogPost<->Blog 的 fixup
+            var detailC = ctx.Set<BlogDetail>().Single(x => x.BlogId == blog.Id);
+            var blogC = ctx.Set<Blog>().Single(x => x.Id == blog.Id);
+
+            if (!ReferenceEquals(detailC.Blog, blogC))
+                throw new Exception("Fixup PhaseC failed: Detail.Blog not fixed up to tracked Blog.");
+            if (postsB.Any(p => !ReferenceEquals(p.Blog, blogC)))
+                throw new Exception("Fixup PhaseC failed: Post.Blog not fixed up to tracked Blog.");
+
+            // 同样，Blog.Posts 要求 Blog.Posts 非 null（建议实体里初始化）
+            if (blogC.Posts.Count != 2)
+                throw new Exception($"Fixup PhaseC failed: Blog.Posts expected 2, got {blogC.Posts.Count}.");
+
+            Console.WriteLine("✅ EF relationship fixup verified (ordering-based; no Include).");
         }
 
         Console.WriteLine("=== END ===");

@@ -6,5 +6,5 @@ public class Blog
     public string Name { get; set; } = "";
     public BlogDetail? Detail { get; set; }
     
-    public ICollection<BlogPost>? Posts { get; set; }
+    public ICollection<BlogPost>? Posts { get; set; } = new List<BlogPost>();
 }
