@@ -40,6 +40,46 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         return Expression.Property(tableExpr, prop);
     }
 
+    private static MethodInfo GetQueryableMethodExact(
+        string name,
+        int genericArgCount,
+        Func<MethodInfo, bool> extraPredicate)
+    {
+        var methods = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == name)
+            .Where(m => m.IsGenericMethodDefinition)
+            .Where(m => m.GetGenericArguments().Length == genericArgCount)
+            .Where(extraPredicate)
+            .ToList();
+
+        if (methods.Count != 1)
+            throw new InvalidOperationException(
+                $"Ambiguous {nameof(Queryable)}.{name}<{genericArgCount}>: {methods.Count} matches");
+
+        return methods[0];
+    }
+
+    private static bool IsQueryableOfT(ParameterInfo p)
+    {
+        var t = p.ParameterType;
+        return t.IsGenericType && t.GetGenericTypeDefinition() == typeof(IQueryable<>);
+    }
+
+    private static bool IsPredicateExpression(ParameterInfo p)
+    {
+        // Expression<Func<TSource,bool>>
+        var t = p.ParameterType;
+        if (!t.IsGenericType) return false;
+        if (t.GetGenericTypeDefinition() != typeof(Expression<>)) return false;
+
+        var inner = t.GetGenericArguments()[0];
+        if (!inner.IsGenericType) return false;
+        if (inner.GetGenericTypeDefinition() != typeof(Func<,>)) return false;
+
+        return inner.GetGenericArguments()[1] == typeof(bool);
+    }
+
     private static MethodInfo GetQueryableMethod(
         string name,
         int genericArgCount,
@@ -86,7 +126,6 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
 
             // 其它参数个数：你当前不需要的话直接排除，避免误选
             return false;
-
         }).ToList();
 
         if (candidates.Count != 1)
@@ -301,6 +340,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                     var any = anyOpen.MakeGenericMethod(elementType);
                     body1 = Expression.Call(any, body1, Expression.Quote(q.TerminalPredicate));
                 }
+
                 break;
             }
 
@@ -318,17 +358,42 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                     var single = singleOpen.MakeGenericMethod(elementType);
                     body1 = Expression.Call(single, body1, Expression.Quote(q.TerminalPredicate));
                 }
+
                 break;
             }
 
             case CustomMemoryTerminalOperator.SingleOrDefault:
             {
-                var sodOpen = GetQueryableMethod(nameof(Queryable.SingleOrDefault), genericArgCount: 1, 1, 2);
-                var sod = sodOpen.MakeGenericMethod(elementType);
+                if (q.TerminalPredicate == null)
+                {
+                    // 选 1 参数版本：SingleOrDefault<T>(IQueryable<T>)
+                    var open = GetQueryableMethodExact(
+                        nameof(Queryable.SingleOrDefault),
+                        genericArgCount: 1,
+                        m =>
+                        {
+                            var ps = m.GetParameters();
+                            return ps.Length == 1 && IsQueryableOfT(ps[0]);
+                        });
 
-                body1 = q.TerminalPredicate == null
-                    ? Expression.Call(sod, body1)
-                    : Expression.Call(sod, body1, Expression.Quote(q.TerminalPredicate));
+                    var closed = open.MakeGenericMethod(elementType);
+                    body1 = Expression.Call(closed, body1);
+                }
+                else
+                {
+                    // 选 predicate 版本：SingleOrDefault<T>(IQueryable<T>, Expression<Func<T,bool>>)
+                    var open = GetQueryableMethodExact(
+                        nameof(Queryable.SingleOrDefault),
+                        genericArgCount: 1,
+                        m =>
+                        {
+                            var ps = m.GetParameters();
+                            return ps.Length == 2 && IsQueryableOfT(ps[0]) && IsPredicateExpression(ps[1]);
+                        });
+
+                    var closed = open.MakeGenericMethod(elementType);
+                    body1 = Expression.Call(closed, body1, Expression.Quote(q.TerminalPredicate));
+                }
 
                 break;
             }
@@ -347,45 +412,157 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                     var first = firstOpen.MakeGenericMethod(elementType);
                     body1 = Expression.Call(first, body1, Expression.Quote(q.TerminalPredicate));
                 }
+
                 break;
             }
 
             case CustomMemoryTerminalOperator.FirstOrDefault:
             {
-                var fodOpen = GetQueryableMethod(nameof(Queryable.FirstOrDefault), genericArgCount: 1, 1, 2);
-                var fod = fodOpen.MakeGenericMethod(elementType);
-
-                body1 = q.TerminalPredicate == null
-                    ? Expression.Call(fod, body1)
-                    : Expression.Call(fod, body1, Expression.Quote(q.TerminalPredicate));
+                if (q.TerminalPredicate == null)
+                {
+                    // ✅ 只选 1 参的 FirstOrDefault(source)
+                    var fodOpen = GetQueryableMethod(nameof(Queryable.FirstOrDefault), genericArgCount: 1, 1);
+                    var fod = fodOpen.MakeGenericMethod(elementType);
+                    body1 = Expression.Call(fod, body1);
+                }
+                else
+                {
+                    // ✅ 明确选 predicate 的 2 参 overload
+                    var fod = GetQueryableFirstOrDefaultWithPredicate(elementType); // 已 close
+                    body1 = Expression.Call(fod, body1, Expression.Quote(q.TerminalPredicate));
+                }
 
                 break;
             }
 
             case CustomMemoryTerminalOperator.Count:
             {
-                var countOpen = GetQueryableMethod(nameof(Queryable.Count), genericArgCount: 1, 1, 2);
-                var count = countOpen.MakeGenericMethod(elementType);
-
-                body1 = q.TerminalPredicate == null
-                    ? Expression.Call(count, body1)
-                    : Expression.Call(count, body1, Expression.Quote(q.TerminalPredicate));
+                if (q.TerminalPredicate == null)
+                {
+                    var countOpen = GetQueryableMethod(nameof(Queryable.Count), genericArgCount: 1, 1); // 只选 1 参
+                    var count = countOpen.MakeGenericMethod(elementType);
+                    body1 = Expression.Call(count, body1);
+                }
+                else
+                {
+                    var countOpen = GetQueryableMethod(nameof(Queryable.Count), genericArgCount: 1, 2); // 只选 2 参
+                    var count = countOpen.MakeGenericMethod(elementType);
+                    body1 = Expression.Call(count, body1, Expression.Quote(q.TerminalPredicate));
+                }
 
                 break;
             }
 
             case CustomMemoryTerminalOperator.LongCount:
             {
-                var lcOpen = GetQueryableMethod(nameof(Queryable.LongCount), genericArgCount: 1, 1, 2);
-                var lc = lcOpen.MakeGenericMethod(elementType);
-
-                body1 = q.TerminalPredicate == null
-                    ? Expression.Call(lc, body1)
-                    : Expression.Call(lc, body1, Expression.Quote(q.TerminalPredicate));
+                if (q.TerminalPredicate == null)
+                {
+                    var lcOpen = GetQueryableMethod(nameof(Queryable.LongCount), genericArgCount: 1, 1);
+                    var lc = lcOpen.MakeGenericMethod(elementType);
+                    body1 = Expression.Call(lc, body1);
+                }
+                else
+                {
+                    var lcOpen = GetQueryableMethod(nameof(Queryable.LongCount), genericArgCount: 1, 2);
+                    var lc = lcOpen.MakeGenericMethod(elementType);
+                    body1 = Expression.Call(lc, body1, Expression.Quote(q.TerminalPredicate));
+                }
 
                 break;
             }
+            case CustomMemoryTerminalOperator.Min:
+            {
+                if (q.TerminalSelector == null)
+                {
+                    // Min(source)
+                    var open = GetQueryableMethod(nameof(Queryable.Min), genericArgCount: 1, 1, 2); // 1参 or comparer版2参
+                    var closed = open.MakeGenericMethod(elementType);
+                    body1 = Expression.Call(closed, body1);
+                }
+                else
+                {
+                    // Min(source, selector)
+                    // selector 的返回类型就是 TResult
+                    var valueType = q.TerminalSelector.ReturnType; // LambdaExpression.ReturnType
 
+                    var min = GetQueryableMinWithSelector(elementType, valueType); // 已经 close 完毕
+                    body1 = Expression.Call(min, body1, Expression.Quote(q.TerminalSelector));
+                }
+
+                break;
+            }
+            case CustomMemoryTerminalOperator.Max:
+            {
+                if (q.TerminalSelector == null)
+                {
+                    // Max(source) or Max(source, comparer)
+                    var open = GetQueryableMethod(nameof(Queryable.Max), genericArgCount: 1, 1, 2);
+                    var closed = open.MakeGenericMethod(elementType);
+                    body1 = Expression.Call(closed, body1);
+                }
+                else
+                {
+                    // Max(source, selector)
+                    var valueType = q.TerminalSelector.ReturnType;
+                    var max = GetQueryableMaxWithSelector(elementType, valueType); // 已 close
+                    body1 = Expression.Call(max, body1, Expression.Quote(q.TerminalSelector));
+                }
+
+                break;
+            }
+            case CustomMemoryTerminalOperator.All:
+            {
+                if (q.TerminalPredicate == null)
+                    throw new Exception("All() requires a predicate, but TerminalPredicate is null.");
+
+                var all = GetQueryableAll(elementType);
+                var pred = q.TerminalPredicate ?? throw new ArgumentNullException(nameof(q.TerminalPredicate));
+                var predBody = efPropRewriter.Visit(rewriter.Visit(pred.Body));
+                var preLam = Expression.Lambda(predBody, pred.Parameters);
+                body1 = Expression.Call(all, body1, Expression.Quote(preLam));
+                break;
+            }
+
+            case CustomMemoryTerminalOperator.Sum:
+            {
+                // Sum 必须有 selector（EF 生成的聚合基本都是带 selector 的）
+                if (q.TerminalSelector == null)
+                    throw new NotSupportedException("Sum without selector is not supported (expected Sum(x => ...)).");
+
+                var selector1 = q.TerminalSelector; // LambdaExpression, e.g. x => (long)x.Id
+
+                // ✅ selector body 也要 rewrite（捕获变量、EF.Property 等）
+                var selBody = efPropRewriter.Visit(rewriter.Visit(selector1.Body)!)!;
+                var selLam = Expression.Lambda(selector1.Type, selBody, selector1.Parameters);
+
+                // selector.ReturnType 决定 Sum 返回类型 / overload
+                var sumOpen = GetQueryableSumWithSelector(elementType, selector1.ReturnType);
+                var sum = sumOpen
+                    .MakeGenericMethod(
+                        elementType); // Sum<TSource>(IQueryable<TSource>, Expression<Func<TSource, ...>>)
+
+                body1 = Expression.Call(sum, body1, Expression.Quote(selLam));
+                break;
+            }
+
+            case CustomMemoryTerminalOperator.Average:
+            {
+                if (q.TerminalSelector == null)
+                    throw new NotSupportedException("Average without selector is not supported (expected Average(x => ...)).");
+
+                var selector2 = q.TerminalSelector; // LambdaExpression: x => (double)x.Id / or x => x.Id
+
+                // ✅ selector 也要 rewrite（EF.Property / captured variables）
+                var selBody = efPropRewriter.Visit(rewriter.Visit(selector2.Body)!)!;
+                var selLam = Expression.Lambda(selector2.Type, selBody, selector2.Parameters);
+
+                var avgOpen = GetQueryableAverageWithSelector(elementType, selector2.ReturnType);
+                var avg = avgOpen.MakeGenericMethod(elementType);
+
+                body1 = Expression.Call(avg, body1, Expression.Quote(selLam));
+                break;
+            }
+            
             default:
                 throw new NotSupportedException($"Terminal '{q.TerminalOperator}' not supported yet.");
         }
@@ -404,6 +581,292 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                 .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
             return iface?.GetGenericArguments()[0];
         }
+    }
+
+    private static MethodInfo GetQueryableAverageWithSelector(Type sourceType, Type valueType)
+    {
+        var candidates = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == nameof(Queryable.Average))
+            .Where(m => m.IsGenericMethodDefinition)
+            .Where(m => m.GetGenericArguments().Length == 1) // Average<TSource>(...)
+            .Where(m => m.GetParameters().Length == 2)       // (source, selector)
+            .ToList();
+
+        static Type? TryGetSelectorReturnType(MethodInfo m)
+        {
+            var p1 = m.GetParameters()[1].ParameterType; // Expression<Func<TSource, X>>
+            if (!p1.IsGenericType) return null;
+
+            var exprArg = p1.GetGenericArguments()[0];   // Func<TSource, X>
+            if (!exprArg.IsGenericType) return null;
+
+            var funcArgs = exprArg.GetGenericArguments();
+            return funcArgs.Length == 2 ? funcArgs[1] : null; // X
+        }
+
+        // 精确匹配
+        var matches = candidates
+            .Where(m => TryGetSelectorReturnType(m) == valueType)
+            .ToList();
+
+        if (matches.Count == 1) return matches[0];
+
+        // nullable-lift 兜底：int vs int? 等
+        matches = candidates
+            .Where(m =>
+            {
+                var rt = TryGetSelectorReturnType(m);
+                if (rt == null) return false;
+
+                if (rt == valueType) return true;
+
+                var rtUnder = Nullable.GetUnderlyingType(rt);
+                var vtUnder = Nullable.GetUnderlyingType(valueType);
+
+                return (rtUnder != null && rtUnder == valueType)
+                       || (vtUnder != null && vtUnder == rt);
+            })
+            .ToList();
+
+        if (matches.Count == 1) return matches[0];
+
+        throw new InvalidOperationException(
+            $"Average(selector) overload not found/ambiguous. source={sourceType}, value={valueType}, matches={matches.Count}");
+    }
+    
+    private static MethodInfo GetQueryableSumWithSelector(Type sourceType, Type valueType)
+    {
+        // Queryable.Sum<TSource>(IQueryable<TSource>, Expression<Func<TSource, X>>) 其中 X 是数值类型
+        // 这个方法是泛型定义：genArgs=1 (TSource)，params=2
+        var candidates = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == nameof(Queryable.Sum))
+            .Where(m => m.IsGenericMethodDefinition)
+            .Where(m => m.GetGenericArguments().Length == 1)
+            .Where(m => m.GetParameters().Length == 2)
+            .ToList();
+
+        // 第二个参数类型形如 Expression<Func<TSource, X>>
+        // 我们要匹配 X == valueType（考虑 Nullable 数值也要支持）
+        static Type? TryGetSelectorReturnType(MethodInfo m)
+        {
+            var p1 = m.GetParameters()[1].ParameterType;
+            if (!p1.IsGenericType) return null; // Expression<...>
+
+            var exprArg = p1.GetGenericArguments()[0]; // Func<TSource, X>
+            if (!exprArg.IsGenericType) return null;
+
+            var funcArgs = exprArg.GetGenericArguments();
+            if (funcArgs.Length != 2) return null;
+
+            return funcArgs[1]; // X
+        }
+
+        var matches = candidates
+            .Where(m =>
+            {
+                var rt = TryGetSelectorReturnType(m);
+                return rt == valueType;
+            })
+            .ToList();
+
+        if (matches.Count == 1) return matches[0];
+
+        // 兜底：有时 EF 会给你 valueType = int，但 overload 是 Nullable<int> 或反过来
+        // 这里做一个“可赋值/可提升”的宽松匹配
+        matches = candidates
+            .Where(m =>
+            {
+                var rt = TryGetSelectorReturnType(m);
+                if (rt == null) return false;
+
+                // exact or nullable-lift
+                if (rt == valueType) return true;
+
+                var rtUnder = Nullable.GetUnderlyingType(rt);
+                var vtUnder = Nullable.GetUnderlyingType(valueType);
+
+                return (rtUnder != null && rtUnder == valueType)
+                       || (vtUnder != null && vtUnder == rt);
+            })
+            .ToList();
+
+        if (matches.Count == 1) return matches[0];
+
+        throw new InvalidOperationException(
+            $"Sum(selector) overload not found/ambiguous. source={sourceType}, value={valueType}, matches={matches.Count}");
+    }
+
+    private static MethodInfo GetQueryableAll(Type elementType)
+    {
+        var m = typeof(Queryable).GetMethods()
+            .Where(mi => mi.Name == nameof(Queryable.All))
+            .Where(mi => mi.IsGenericMethodDefinition)
+            .Where(mi => mi.GetGenericArguments().Length == 1)
+            .Select(mi => new { mi, ps = mi.GetParameters() })
+            .Where(x => x.ps.Length == 2)
+            .Where(x => x.ps[0].ParameterType.IsGenericType
+                        && x.ps[0].ParameterType.GetGenericTypeDefinition() == typeof(IQueryable<>))
+            .Where(x => x.ps[1].ParameterType.IsGenericType
+                        && x.ps[1].ParameterType.GetGenericTypeDefinition() == typeof(Expression<>))
+            .Select(x => x.mi)
+            .Single();
+
+        return m.MakeGenericMethod(elementType);
+    }
+
+    private static MethodInfo GetQueryableFirstOrDefaultWithPredicate(Type elementType)
+    {
+        var matches = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == nameof(Queryable.FirstOrDefault))
+            .Where(m => m.IsGenericMethodDefinition)
+            .Where(m => m.GetGenericArguments().Length == 1)
+            .Where(m =>
+            {
+                var ps = m.GetParameters();
+                if (ps.Length != 2) return false;
+
+                // param0: IQueryable<T>
+                if (!ps[0].ParameterType.IsGenericType) return false;
+                if (ps[0].ParameterType.GetGenericTypeDefinition() != typeof(IQueryable<>)) return false;
+
+                // param1: Expression<Func<T,bool>>  (排除 defaultValue: T)
+                var p1 = ps[1].ParameterType;
+                if (!p1.IsGenericType || p1.GetGenericTypeDefinition() != typeof(Expression<>)) return false;
+
+                var del = p1.GetGenericArguments()[0];
+                return del.IsGenericType
+                       && del.GetGenericTypeDefinition() == typeof(Func<,>)
+                       && del.GetGenericArguments()[1] == typeof(bool);
+            })
+            .ToList();
+
+        if (matches.Count != 1)
+            throw new InvalidOperationException(
+                $"FirstOrDefault(source,predicate) overload not found/ambiguous. matches={matches.Count}");
+
+        return matches[0].MakeGenericMethod(elementType);
+    }
+
+    private static MethodInfo GetQueryableMaxWithSelector(Type sourceType, Type valueType)
+    {
+        var matches = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == nameof(Queryable.Max))
+            .Where(m => m.IsGenericMethodDefinition)
+            .Where(m => m.GetGenericArguments().Length == 2) // ✅ Max<TSource,TResult>
+            .Where(m =>
+            {
+                var ps = m.GetParameters();
+                if (ps.Length != 2) return false;
+
+                // IQueryable<TSource>
+                if (!ps[0].ParameterType.IsGenericType) return false;
+                if (ps[0].ParameterType.GetGenericTypeDefinition() != typeof(IQueryable<>)) return false;
+
+                // Expression<Func<TSource, TResult>>
+                var p1 = ps[1].ParameterType;
+                if (!p1.IsGenericType || p1.GetGenericTypeDefinition() != typeof(Expression<>)) return false;
+
+                var del = p1.GetGenericArguments()[0];
+                if (!del.IsGenericType || del.GetGenericTypeDefinition() != typeof(Func<,>)) return false;
+
+                return true;
+            })
+            .ToList();
+
+        if (matches.Count != 1)
+            throw new InvalidOperationException(
+                $"Max(selector) overload not found/ambiguous. source={sourceType}, value={valueType}, matches={matches.Count}");
+
+        return matches[0].MakeGenericMethod(sourceType, valueType);
+    }
+
+    private static MethodInfo GetQueryableMinWithSelector(Type sourceType, Type valueType)
+    {
+        var matches = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == nameof(Queryable.Min))
+            .Where(m => m.IsGenericMethodDefinition)
+            .Where(m => m.GetGenericArguments().Length == 2) // ✅关键：2 个泛型参数
+            .Where(m =>
+            {
+                var ps = m.GetParameters();
+                if (ps.Length != 2) return false;
+
+                // IQueryable<TSource>
+                if (!ps[0].ParameterType.IsGenericType) return false;
+                if (ps[0].ParameterType.GetGenericTypeDefinition() != typeof(IQueryable<>)) return false;
+
+                // Expression<Func<TSource, TResult>>
+                var p1 = ps[1].ParameterType;
+                if (!p1.IsGenericType || p1.GetGenericTypeDefinition() != typeof(Expression<>)) return false;
+
+                var del = p1.GetGenericArguments()[0];
+                if (!del.IsGenericType || del.GetGenericTypeDefinition() != typeof(Func<,>)) return false;
+
+                var args = del.GetGenericArguments();
+                if (args.Length != 2) return false;
+
+                // 这里不用死盯 args[0]==sourceType，因为它是 open generic (TSource)，我们只需要确保是 Func<,>
+                // 返回值类型也不用在 open method 上比对（同样是 TResult），close 之后自然匹配
+                return true;
+            })
+            .ToList();
+
+        if (matches.Count != 1)
+            throw new InvalidOperationException(
+                $"Min(selector) overload not found/ambiguous. source={sourceType}, value={valueType}, matches={matches.Count}");
+
+        // ✅ close 两个泛型参数
+        return matches[0].MakeGenericMethod(sourceType, valueType);
+    }
+
+    private static void DumpQueryableMinOverloads()
+    {
+        var mins = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == nameof(Queryable.Min))
+            .OrderBy(m => m.GetParameters().Length)
+            .ThenBy(m => m.IsGenericMethodDefinition ? m.GetGenericArguments().Length : 0)
+            .ToList();
+
+        Console.WriteLine("---- Queryable.Min overloads ----");
+        foreach (var m in mins)
+        {
+            var ga = m.IsGenericMethodDefinition ? m.GetGenericArguments().Length : 0;
+            var ps = string.Join(", ", m.GetParameters().Select(p => p.ParameterType.ToString()));
+            Console.WriteLine(
+                $"  genDef={m.IsGenericMethodDefinition} genArgs={ga} params={m.GetParameters().Length}  {m.ReturnType} {m.Name}({ps})");
+        }
+
+        Console.WriteLine("---------------------------------");
+    }
+
+    private static MethodInfo GetQueryableNonGenericMin(Type elementType)
+    {
+        // Queryable.Min(IQueryable<int>) / IQueryable<int?> / IQueryable<decimal> ... 等
+        // 这里用参数类型精确匹配：IQueryable<elementType>
+        var wantedParam = typeof(IQueryable<>).MakeGenericType(elementType);
+
+        var candidates = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == nameof(Queryable.Min))
+            .Where(m => !m.IsGenericMethodDefinition)
+            .Where(m =>
+            {
+                var ps = m.GetParameters();
+                return ps.Length == 1 && ps[0].ParameterType == wantedParam;
+            })
+            .ToList();
+
+        if (candidates.Count != 1)
+            throw new InvalidOperationException(
+                $"Min non-generic overload not found or ambiguous for elementType={elementType}. Matches={candidates.Count}");
+
+        return candidates[0];
     }
 
     // Build IMemoryTable<T>. instance expression
@@ -513,7 +976,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         // NEW: QueryRows-based path (incremental rollout)
         return CompileQueryRowsPipeline(q, shapedQueryExpression);
     }
-    
+
 // ③ 新增：把 List<T> 塞给 collection property（ICollection<T> / List<T> 都可）
     private static void SetCollectionProperty(object owner, PropertyInfo navProp, object list)
     {
@@ -542,7 +1005,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         throw new InvalidOperationException(
             $"Cannot assign list to navigation '{navProp.DeclaringType?.Name}.{navProp.Name}' type '{pt.FullName}'.");
     }
-    
+
     // --- THIS is where EF identity resolution happens ---
     private static TEntity TrackFromRow<TEntity>(
         QueryContext qc,
@@ -588,7 +1051,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         ProviderDiagnostics.StartTrackingCalled++;
         return (TEntity)trackedEntry.Entity;
     }
-    
+
     private static MethodInfo QueryableSelect_NoIndex()
     {
         return typeof(Queryable).GetMethods(BindingFlags.Public | BindingFlags.Static)

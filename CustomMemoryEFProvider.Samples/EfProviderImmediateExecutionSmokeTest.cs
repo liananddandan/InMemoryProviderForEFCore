@@ -1,5 +1,8 @@
+using System;
+using System.Linq;
 using CustomEFCoreProvider.Samples.Entities;
 using CustomEFCoreProvider.Samples.Infrastructure;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CustomEFCoreProvider.Samples;
@@ -40,142 +43,136 @@ public static class EfProviderImmediateExecutionSmokeTest
             var ctx = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var set = ctx.Set<TestEntity>();
 
-            // Helpful diagnostics: shows what this context can see
-            var totalCount = set.Count();
-            Console.WriteLine($"[Diag] totalCount={totalCount}");
+            // Helpful diagnostics (not assertions)
+            Console.WriteLine($"[Diag] totalCount={set.Count()}");
             Console.WriteLine($"[Diag] minId={set.Min(x => x.Id)}, maxId={set.Max(x => x.Id)}");
 
             // 1) ToList
             var list = set.ToList();
-            Console.WriteLine($"[ToList] count={list.Count}");
+            Require(list.Count >= 5, $"Expected at least 5 rows in table after seed, but got {list.Count}.");
+
+            // Use seed-range to make expectations deterministic
+            var inRange = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId);
 
             // 2) Count (seed-range)
-            var seedRangeCount = set.Count(x => x.Id >= seedMinId && x.Id <= seedMaxId);
-            Console.WriteLine($"[Count seed-range] {seedRangeCount} (expected 5)");
+            Require(inRange.Count() == 5, $"Count(seed-range) expected 5, got {inRange.Count()}.");
 
             // 3) Any
-            var any = set.Any();
-            Console.WriteLine($"[Any] {any} (expected True)");
+            Require(set.Any() == true, "Any() expected True, got False.");
 
-            // 4) First/FirstOrDefault (ordering undefined unless OrderBy)
-            var firstOrDefault = set.FirstOrDefault();
-            Console.WriteLine(
-                $"[FirstOrDefault] {(firstOrDefault == null ? "NULL" : $"{firstOrDefault.Id} {firstOrDefault.Name}")}");
+            // 4) First/FirstOrDefault (non-deterministic without order, so force order)
+            var ordered = set.OrderBy(x => x.Id);
 
-            var first = set.First();
-            Console.WriteLine($"[First] {first.Id} {first.Name}");
+            var firstOrDefault = ordered.FirstOrDefault();
+            Require(firstOrDefault != null, "FirstOrDefault() expected entity, got NULL.");
 
-            // 5) Single (exactly one inside seed-range by Id)
-            try
-            {
-                var single = set.Single(x => x.Id == seedMinId);
-                Console.WriteLine($"[Single] OK: {single.Id} {single.Name}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Single] FAIL (should not throw): {ex.GetType().Name} {ex.Message}");
-            }
+            var first = ordered.First();
+            Require(first != null, "First() expected entity, got NULL.");
 
-            // 6) SingleOrDefault (none)
-            try
-            {
-                var missing = set.SingleOrDefault(x => x.Id == -1);
-                Console.WriteLine(missing == null
-                    ? "[SingleOrDefault missing] OK: NULL"
-                    : "[SingleOrDefault missing] FAIL: expected NULL");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[SingleOrDefault missing] FAIL (should not throw): {ex.GetType().Name} {ex.Message}");
-            }
+            // 5) Single (exactly one by Id)
+            var single = set.Single(x => x.Id == seedMinId);
+            Require(single.Id == seedMinId, $"Single(Id==minId) expected Id={seedMinId}, got {single.Id}.");
 
-            // 7) Single (multi => should throw) - use seed-range, guaranteed >= 5 rows
-            try
-            {
-                var boom = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId).Single();
-                Console.WriteLine("[Single multi] FAIL (should throw)");
-            }
-            catch (InvalidOperationException)
-            {
-                Console.WriteLine("[Single multi] OK (threw InvalidOperationException)");
-            }
+            // 6) SingleOrDefault (none) - SHOULD NOT throw, should return null
+            var missing = set.SingleOrDefault(x => x.Id == -1);
+            Require(missing == null, "SingleOrDefault(Id==-1) expected NULL, got entity.");
 
-            // 8) All - deterministic predicates based on seedMinId/seedMaxId
-            var allTrue = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId)
-                .All(x => x.Id >= seedMinId);
-            Console.WriteLine($"[All seed-range x.Id>=minId] {allTrue} (expected True)");
+            // 7) Single (multi => should throw)
+            ExpectThrows<InvalidOperationException>(
+                () => inRange.Single(),
+                "Single(seed-range) should throw InvalidOperationException because multiple rows exist.");
 
-            var allFalse = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId)
-                .All(x => x.Id > seedMinId); // row with Id==seedMinId breaks it
-            Console.WriteLine($"[All seed-range x.Id>minId] {allFalse} (expected False)");
+            // 8) All - deterministic
+            var allTrue = inRange.All(x => x.Id >= seedMinId);
+            Require(allTrue == true, "All(seed-range x.Id>=minId) expected True, got False.");
+
+            var allFalse = inRange.All(x => x.Id > seedMinId);
+            Require(allFalse == false, "All(seed-range x.Id>minId) expected False, got True.");
 
             var emptyAll = set.Where(x => x.Id < 0).All(x => x.Id > 0);
-            Console.WriteLine($"[All on empty] {emptyAll} (expected True)");
+            Require(emptyAll == true, "All(on empty) expected True, got False.");
 
-            // captured variable test (forces parameterization)
             int threshold = seedMinId;
-            var capturedFalse = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId)
-                .All(x => x.Id > threshold);
-            Console.WriteLine($"[All captured threshold=minId] {capturedFalse} (expected False)");
+            var capturedFalse = inRange.All(x => x.Id > threshold);
+            Require(capturedFalse == false, "All(captured threshold=minId) expected False, got True.");
 
             // 9) Min / Max (seed-range)
-            var minId = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId).Min(x => x.Id);
-            Console.WriteLine($"[Min seed-range Id] {minId} (expected {seedMinId})");
+            var minId = inRange.Min(x => x.Id);
+            Require(minId == seedMinId, $"Min(seed-range Id) expected {seedMinId}, got {minId}.");
 
-            var maxId = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId).Max(x => x.Id);
-            Console.WriteLine($"[Max seed-range Id] {maxId} (expected {seedMaxId})");
+            var maxId = inRange.Max(x => x.Id);
+            Require(maxId == seedMaxId, $"Max(seed-range Id) expected {seedMaxId}, got {maxId}.");
 
             // 10) LongCount
-            var longCount = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId).LongCount();
-            Console.WriteLine($"[LongCount seed-range] {longCount} (expected 5)");
+            var longCount = inRange.LongCount();
+            Require(longCount == 5, $"LongCount(seed-range) expected 5, got {longCount}.");
 
-            // 11) Sum (NO IQueryable.Select, because TranslateSelect not implemented)
-            var seedEntities = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId).ToList(); // materialize first
+            // 11) Sum
+            var seedEntities = inRange.ToList(); // materialize for expected
             var expectedSum = seedEntities.Select(e => (long)e.Id).Sum();
 
-            var sum = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId)
-                .Sum(x => (long)x.Id);
-            Console.WriteLine($"[Sum seed-range Id] {sum} (expected {expectedSum})");
+            var sum = inRange.Sum(x => (long)x.Id);
+            Require(sum == expectedSum, $"Sum(seed-range Id) expected {expectedSum}, got {sum}.");
 
-            // 12) Average (NO IQueryable.Select)
+            // 12) Average
             var expectedAvg = seedEntities.Select(e => (double)e.Id).Average();
-
-            var avg = set.Where(x => x.Id >= seedMinId && x.Id <= seedMaxId)
-                .Average(x => (double)x.Id);
-            Console.WriteLine($"[Average seed-range Id] {avg} (expected {expectedAvg})");
+            var avg = inRange.Average(x => (double)x.Id);
+            Require(AreClose(avg, expectedAvg), $"Average(seed-range Id) expected {expectedAvg}, got {avg}.");
 
             // 13) Any with predicate
-            var anyInRange = set.Any(x => x.Id >= seedMinId && x.Id <= seedMaxId);
-            Console.WriteLine($"[Any predicate seed-range] {anyInRange} (expected True)");
-
-            var anyMissing = set.Any(x => x.Id < 0);
-            Console.WriteLine($"[Any predicate missing] {anyMissing} (expected False)");
+            Require(set.Any(x => x.Id >= seedMinId && x.Id <= seedMaxId) == true, "Any(predicate seed-range) expected True.");
+            Require(set.Any(x => x.Id < 0) == false, "Any(predicate missing) expected False.");
 
             // 14) Count with predicate
-            var countInRange = set.Count(x => x.Id >= seedMinId && x.Id <= seedMaxId);
-            Console.WriteLine($"[Count predicate seed-range] {countInRange} (expected 5)");
-
-            var countMissing = set.Count(x => x.Id < 0);
-            Console.WriteLine($"[Count predicate missing] {countMissing} (expected 0)");
+            Require(set.Count(x => x.Id >= seedMinId && x.Id <= seedMaxId) == 5, "Count(predicate seed-range) expected 5.");
+            Require(set.Count(x => x.Id < 0) == 0, "Count(predicate missing) expected 0.");
 
             // 15) FirstOrDefault with predicate
             var firstInRange = set.FirstOrDefault(x => x.Id >= seedMinId && x.Id <= seedMaxId);
-            Console.WriteLine(firstInRange == null
-                ? "[FirstOrDefault predicate seed-range] FAIL (expected entity)"
-                : $"[FirstOrDefault predicate seed-range] OK: {firstInRange.Id} {firstInRange.Name}");
+            Require(firstInRange != null, "FirstOrDefault(predicate seed-range) expected entity, got NULL.");
 
             var firstMissing = set.FirstOrDefault(x => x.Id < 0);
-            Console.WriteLine(firstMissing == null
-                ? "[FirstOrDefault predicate missing] OK: NULL"
-                : "[FirstOrDefault predicate missing] FAIL (expected NULL)");
+            Require(firstMissing == null, "FirstOrDefault(predicate missing) expected NULL, got entity.");
 
             // 16) SingleOrDefault with predicate exact
-            var singleOrDefaultInRange = set.SingleOrDefault(x => x.Id == seedMinId);
-            Console.WriteLine(singleOrDefaultInRange == null
-                ? "[SingleOrDefault predicate exact] FAIL (expected entity)"
-                : $"[SingleOrDefault predicate exact] OK: {singleOrDefaultInRange.Id} {singleOrDefaultInRange.Name}");
+            var singleOrDefaultExact = set.SingleOrDefault(x => x.Id == seedMinId);
+            Require(singleOrDefaultExact != null, "SingleOrDefault(predicate exact) expected entity, got NULL.");
+            Require(singleOrDefaultExact!.Id == seedMinId, $"SingleOrDefault(predicate exact) expected Id={seedMinId}, got {singleOrDefaultExact.Id}.");
+
+            // 17) SingleOrDefault with predicate multi => should throw
+            ExpectThrows<InvalidOperationException>(
+                () => set.SingleOrDefault(x => x.Id >= seedMinId && x.Id <= seedMaxId),
+                "SingleOrDefault(seed-range) should throw InvalidOperationException because multiple rows exist.");
+
+            Console.WriteLine("✅ IMMEDIATE OPS SMOKE TEST PASSED");
         }
 
         Console.WriteLine("=== END ===");
     }
+
+    private static void Require(bool condition, string message)
+    {
+        if (!condition) throw new Exception("❌ Validation Failed: " + message);
+    }
+
+    private static void ExpectThrows<T>(Action action, string messageIfNotThrown) where T : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (T)
+        {
+            return; // OK
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"❌ Validation Failed: Expected {typeof(T).Name}, but got {ex.GetType().Name}: {ex.Message}");
+        }
+
+        throw new Exception("❌ Validation Failed: " + messageIfNotThrown);
+    }
+
+    private static bool AreClose(double a, double b, double eps = 1e-9)
+        => Math.Abs(a - b) <= eps;
 }
