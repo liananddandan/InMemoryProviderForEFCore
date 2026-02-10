@@ -66,7 +66,7 @@ public static class EfProviderWhereSelectSmokeTest
         // ---------------- SelectMany SMOKE TEST ----------------
         Console.WriteLine("=== SELECTMANY SMOKE TEST ===");
 
-// 为了不依赖 Include，这里单独 seed 一组 BlogPost + Comment
+        // 为了不依赖 Include，这里单独 seed 一组 BlogPost + Comment
         var post1 = new BlogPost { Title = "Post-1" };
         var post2 = new BlogPost { Title = "Post-2" };
 
@@ -77,7 +77,7 @@ public static class EfProviderWhereSelectSmokeTest
         ctx.AddRange(post1, post2, c11, c12, c21);
         ctx.SaveChanges();
 
-// Act: SelectMany flatten
+        // Act: SelectMany flatten
         var flat = ctx.Set<BlogPost>()
             .OrderBy(p => p.Id)
             .SelectMany(

@@ -28,14 +28,14 @@ try
     //      CrudMultiple = true,
     //      CrudDetached = true
     //  });
-    //
+    
     // tester.Run(sp);
     // EfProviderFinderSmokeTest.Run(sp);
     // EfProviderImmediateExecutionSmokeTest.Run(sp);
-    EfProviderWhereSelectSmokeTest.Run(sp);
+    // EfProviderWhereSelectSmokeTest.Run(sp);
     // EfProviderOrderBySmokeTest.Run(sp);
     // EfProviderSkipTakeSmokeTest.Run(sp);
-    // EfProviderIncludeReferenceSmokeTest.Run(sp);
+    EfProviderIncludeReferenceSmokeTest.Run(sp);
     // EfProviderIncludeCollectionSmokeTest.Run(sp);
     // EfProviderIncludeNestedSmokeTest.Run(sp);
     // IdentityResolutionProblemSmokeTest.Run(sp);

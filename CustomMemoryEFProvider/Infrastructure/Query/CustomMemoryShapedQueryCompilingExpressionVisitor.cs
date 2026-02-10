@@ -1,10 +1,13 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Text;
 using CustomMemoryEFProvider.Core.Diagnostics;
 using CustomMemoryEFProvider.Core.Implementations;
 using CustomMemoryEFProvider.Core.Interfaces;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Query;
+using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
 using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CustomMemoryEFProvider.Infrastructure.Query;
@@ -29,7 +32,21 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                               ?? throw new InvalidOperationException(
                                   "EntityMaterializerSource is not available in dependencies.");
     }
-
+    
+    private static TEntity FixupReference<TEntity, TIncluded>(
+        TEntity entity,
+        TIncluded included,
+        string navigationName)
+        where TEntity : class
+        where TIncluded : class
+    {
+        if (entity == null) return entity;
+        var prop = typeof(TEntity).GetProperty(navigationName);
+        if (prop != null)
+            prop.SetValue(entity, included);
+        return entity;
+    }
+    
     private static Expression BuildQueryRowsExpression(Expression tableExpr, Type clrType)
     {
         // tableExpr.Type == IMemoryTable<BlogPost> 这种
@@ -143,7 +160,12 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         // We only support "sequence" queries here (no scalar terminals) for now.
         // if (q.TerminalOperator != CustomMemoryTerminalOperator.None)
         //     throw new NotSupportedException("QueryRows pipeline: terminal operators not migrated yet.");
+        Console.WriteLine("=== [DBG] SHAPED QueryExpression ===");
+        Console.WriteLine(ExpressionDumper.Dump(shapedQueryExpression.QueryExpression));
 
+        Console.WriteLine("=== [DBG] SHAPED ShaperExpression ===");
+        Console.WriteLine(ExpressionDumper.Dump(shapedQueryExpression.ShaperExpression));
+        
         var entityType = q.EntityType;
         var clrType = entityType.ClrType;
 
@@ -183,7 +205,10 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         //    otherwise you'll still increment QueryCalled via fallback.
         var rewriter = new QueryParameterRewritingVisitor(qcParam);
         var efPropRewriter = new EfPropertyRewritingVisitor();
-        var entityRootRewriter = new EntityQueryRootRewritingVisitor(BuildQueryRowsEntityQueryable);
+        var entityRootRewriter = new EntityQueryRootRewritingVisitor(
+            qcParam,
+            (clrType, qcExpr, efEntityType) 
+                => BuildQueryRowsEntityQueryable(clrType, qcExpr, efEntityType));
 
         foreach (var step in q.Steps)
         {
@@ -228,7 +253,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
 
                 case SkipStep sk:
                 {
-                    var skipOpen = GetQueryableMethod(nameof(Queryable.Skip), genericArgCount: 1, 2);
+                    var skipOpen = QueryableSkip_NoIndex();
 
                     var skipClosed = skipOpen.MakeGenericMethod(currentElementType);
 
@@ -242,7 +267,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
 
                 case TakeStep tk:
                 {
-                    var takeOpen = GetQueryableMethod(nameof(Queryable.Take), genericArgCount: 1, 2);
+                    var takeOpen = QueryableTake_NoIndex();
 
                     var takeClosed = takeOpen.MakeGenericMethod(currentElementType);
 
@@ -313,6 +338,150 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                     break;
                 }
 
+                case LeftJoinStep lj:
+                {
+                    Console.WriteLine("=== [DBG] LEFTJOIN ENTER ===");
+                    Console.WriteLine("[DBG] sourceExpr BEFORE = " + sourceExpr);
+                    
+                    // OUTER = currentElementType
+                    var outerType = currentElementType;
+
+                    // EF already tells you TInner from lambda parameter type
+                    var innerType = lj.InnerKeySelector.Parameters[0].Type;
+
+                    // Build inner IQueryable<TInner> from your stored CustomMemoryQueryExpression
+                    // (recursively: root + its steps)
+                    var innerSourceExpr = BuildQueryableFromQueryExpression(
+                        lj.InnerQuery,
+                        innerType,
+                        qcParam,
+                        rewriter,
+                        entityRootRewriter,
+                        efPropRewriter);
+                    Console.WriteLine("=== [DBG] outerKeySelector (raw) ===");
+                    Console.WriteLine(ExpressionDumper.Dump(lj.OuterKeySelector));
+
+                    Console.WriteLine("=== [DBG] innerKeySelector (raw) ===");
+                    Console.WriteLine(ExpressionDumper.Dump(lj.InnerKeySelector));
+
+                    Console.WriteLine("=== [DBG] resultSelector (raw) ===");
+                    Console.WriteLine(ExpressionDumper.Dump(lj.ResultSelector));
+                    // Rewrite key selectors + result selector (parameterization + root rewrite + EF.Property)
+                    var outerKey = RewriteLambda(
+                        lj.OuterKeySelector,
+                        rewriter,
+                        entityRootRewriter,
+                        efPropRewriter);
+
+                    var innerKey = RewriteLambda(
+                        lj.InnerKeySelector,
+                        rewriter,
+                        entityRootRewriter,
+                        efPropRewriter);
+
+                    var resultSel = RewriteLambda(
+                        lj.ResultSelector,
+                        rewriter,
+                        entityRootRewriter,
+                        efPropRewriter);
+                    Console.WriteLine("=== [DBG] outerKeySelector (rewritten) ===");
+                    Console.WriteLine(ExpressionDumper.Dump(outerKey));
+
+                    Console.WriteLine("=== [DBG] innerKeySelector (rewritten) ===");
+                    Console.WriteLine(ExpressionDumper.Dump(innerKey));
+
+                    Console.WriteLine("=== [DBG] resultSelector (rewritten) ===");
+                    Console.WriteLine(ExpressionDumper.Dump(resultSel));
+
+                    // 你完成 sourceExpr = Expression.Call(...GroupJoin/SelectMany...) 之后：
+                    Console.WriteLine("[DBG] sourceExpr AFTER = " + sourceExpr);
+                    Console.WriteLine("=== [DBG] sourceExpr TREE ===");
+                    Console.WriteLine(ExpressionDumper.Dump(sourceExpr));
+
+                    Console.WriteLine("=== [DBG] LEFTJOIN EXIT ===");
+                    var keyType = outerKey.ReturnType; // should match innerKey.ReturnType
+
+                    // IMPORTANT: Queryable has no LeftJoin. Implement LeftJoin via GroupJoin + SelectMany + DefaultIfEmpty.
+                    //
+                    // outer.GroupJoin(inner, ok, ik, (o, inners) => (o, inners))
+                    //      .SelectMany(t => inners.DefaultIfEmpty(), (t, i) => resultSelector(t.o, i))
+
+                    // ---- GroupJoin ----
+                    var tupleType = typeof(ValueTuple<,>).MakeGenericType(outerType,
+                        typeof(IEnumerable<>).MakeGenericType(innerType));
+                    var tupleCtor = tupleType.GetConstructor(new[]
+                    {
+                        outerType,
+                        typeof(IEnumerable<>).MakeGenericType(innerType)
+                    })!;
+
+                    var oParam = Expression.Parameter(outerType, "o");
+                    var innersParam = Expression.Parameter(typeof(IEnumerable<>).MakeGenericType(innerType), "inners");
+
+                    var groupJoinResultSelector = Expression.Lambda(
+                        Expression.New(tupleCtor, oParam, innersParam),
+                        oParam,
+                        innersParam);
+
+                    var ms = typeof(Queryable).GetMethods(BindingFlags.Public | BindingFlags.Static)
+                        .Where(m => m.Name == nameof(Queryable.GroupJoin))
+                        .ToList();
+
+                    var groupJoinOpen = GetQueryableGroupJoin(withComparer: false);              
+                    var groupJoin = groupJoinOpen.MakeGenericMethod(outerType, innerType, keyType, tupleType);
+                    var afterGroupJoin = Expression.Call(
+                        groupJoin,
+                        sourceExpr, // outer source (IQueryable<TOuter>)
+                        innerSourceExpr, // inner source (IQueryable<TInner>)
+                        Expression.Quote(outerKey), // outer key
+                        Expression.Quote(innerKey), // inner key
+                        Expression.Quote(groupJoinResultSelector));
+
+                    // ---- SelectMany over (o, inners) with DefaultIfEmpty ----
+                    // collectionSelector: t => ((IEnumerable<TInner>)t.Item2).DefaultIfEmpty()
+                    var tParam = Expression.Parameter(tupleType, "t");
+
+                    var item1 = GetValueTupleItem(tParam, 1); // outer
+                    var item2 = GetValueTupleItem(tParam, 2);  // IEnumerable<TInner>
+
+                    var defaultIfEmptyOpen = typeof(Enumerable).GetMethods()
+                        .Single(m => m.Name == nameof(Enumerable.DefaultIfEmpty)
+                                     && m.IsGenericMethodDefinition
+                                     && m.GetParameters().Length == 1);
+                    var defaultIfEmpty = defaultIfEmptyOpen.MakeGenericMethod(innerType);
+
+                    var defIfEmptyCall = Expression.Call(defaultIfEmpty, item2);
+                    var collectionSelector = Expression.Lambda(
+                        defIfEmptyCall, // IEnumerable<TInner>
+                        tParam);
+
+                    // resultSelector: (t, i) => resultSel(t.Item1, i)
+                    var iParam = Expression.Parameter(innerType, "i");
+
+                    // resultSel is LambdaExpression (outer, inner) => TResult
+                    var invoked = Expression.Invoke(resultSel, item1, iParam);
+                    var resSelector = Expression.Lambda(invoked, tParam, iParam);
+
+                    var selectManyOpen = QueryableSelectMany_CollectionSelector_NoIndex();
+                    var selectMany = selectManyOpen.MakeGenericMethod(tupleType, innerType, invoked.Type);
+
+                    sourceExpr = Expression.Call(
+                        selectMany,
+                        afterGroupJoin,
+                        Expression.Quote(collectionSelector),
+                        Expression.Quote(resSelector));
+
+                    currentElementType = invoked.Type;
+                    Console.WriteLine("=== [DBG] LEFTJOIN AFTER sourceExpr ===");
+                    Console.WriteLine(sourceExpr.ToString());
+
+                    var ext = FindFirstExtension(sourceExpr);
+                    if (ext != null)
+                    {
+                        Console.WriteLine($"[DBG] FIRST EXT NODE: {ext.GetType().FullName}, CanReduce={ext.CanReduce}, Type={ext.Type}");
+                    }
+                    break;
+                }
                 default:
                     throw new NotSupportedException($"QueryRows pipeline: step '{step.Kind}' not migrated.");
             }
@@ -548,7 +717,8 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
             case CustomMemoryTerminalOperator.Average:
             {
                 if (q.TerminalSelector == null)
-                    throw new NotSupportedException("Average without selector is not supported (expected Average(x => ...)).");
+                    throw new NotSupportedException(
+                        "Average without selector is not supported (expected Average(x => ...)).");
 
                 var selector2 = q.TerminalSelector; // LambdaExpression: x => (double)x.Id / or x => x.Id
 
@@ -562,7 +732,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                 body1 = Expression.Call(avg, body1, Expression.Quote(selLam));
                 break;
             }
-            
+
             default:
                 throw new NotSupportedException($"Terminal '{q.TerminalOperator}' not supported yet.");
         }
@@ -583,6 +753,417 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         }
     }
 
+    private static MethodInfo GetQueryableGroupJoin(bool withComparer)
+    {
+        var methods = typeof(Queryable).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == nameof(Queryable.GroupJoin))
+            .Where(m => m.IsGenericMethodDefinition)
+            .Where(m => m.GetGenericArguments().Length == 4)
+            .ToList();
+
+        int expectedParams = withComparer ? 6 : 5;
+
+        MethodInfo? match = null;
+
+        foreach (var m in methods)
+        {
+            var ps = m.GetParameters();
+            if (ps.Length != expectedParams) continue;
+
+            // 0) IQueryable<TOuter>
+            if (!IsGeneric(ps[0].ParameterType, typeof(IQueryable<>))) continue;
+
+            // 1) IEnumerable<TInner>  <-- 这就是你通用 GetQueryableMethod 常常过滤掉的点
+            if (!IsGeneric(ps[1].ParameterType, typeof(IEnumerable<>))) continue;
+
+            // 2) Expression<Func<TOuter, TKey>>
+            if (!IsExpressionOfFunc(ps[2].ParameterType, 2)) continue;
+
+            // 3) Expression<Func<TInner, TKey>>
+            if (!IsExpressionOfFunc(ps[3].ParameterType, 2)) continue;
+
+            // 4) Expression<Func<TOuter, IEnumerable<TInner>, TResult>>
+            if (!IsExpressionOfFunc(ps[4].ParameterType, 3)) continue;
+
+            // 5) IEqualityComparer<TKey>
+            if (withComparer && !IsGeneric(ps[5].ParameterType, typeof(IEqualityComparer<>))) continue;
+
+            if (match != null)
+                throw new InvalidOperationException($"GroupJoin overload resolution ambiguous: {match} vs {m}");
+
+            match = m;
+        }
+
+        if (match == null)
+            throw new InvalidOperationException($"Queryable.GroupJoin overload not found. withComparer={withComparer}");
+
+        return match;
+
+        static bool IsGeneric(Type t, Type openGeneric)
+            => t.IsGenericType && t.GetGenericTypeDefinition() == openGeneric;
+
+        static bool IsExpressionOfFunc(Type t, int funcArgCount)
+        {
+            if (!t.IsGenericType || t.GetGenericTypeDefinition() != typeof(Expression<>)) return false;
+
+            var inner = t.GetGenericArguments()[0];
+            if (!inner.IsGenericType) return false;
+
+            var def = inner.GetGenericTypeDefinition();
+            if (def != typeof(Func<,>) && def != typeof(Func<,,>)) return false;
+
+            return inner.GetGenericArguments().Length == funcArgCount;
+        }
+    }
+
+    private static MethodInfo QueryableTake_NoIndex()
+    {
+        // IQueryable<TSource> Take<TSource>(IQueryable<TSource>, int)
+        var m = typeof(Queryable).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(x => x.Name == nameof(Queryable.Take) && x.IsGenericMethodDefinition)
+            .Where(x => x.GetGenericArguments().Length == 1)
+            .Single(x =>
+            {
+                var ps = x.GetParameters();
+                if (ps.Length != 2) return false;
+
+                // param0: IQueryable<TSource>
+                if (!ps[0].ParameterType.IsGenericType) return false;
+                if (ps[0].ParameterType.GetGenericTypeDefinition() != typeof(IQueryable<>)) return false;
+
+                // param1: int
+                return ps[1].ParameterType == typeof(int);
+            });
+
+        return m;
+    }
+
+    private static LambdaExpression RewriteLambda(
+        LambdaExpression lam,
+        QueryParameterRewritingVisitor rewriter,
+        EntityQueryRootRewritingVisitor entityRootRewriter,
+        EfPropertyRewritingVisitor efPropRewriter)
+    {
+        // Keep original parameters, rewrite body only
+        var body = lam.Body;
+        body = rewriter.Visit(body)!;
+        body = entityRootRewriter.Visit(body)!;
+        body = efPropRewriter.Visit(body)!;
+        body = AlignLambdaBodyToReturnType(body, lam.ReturnType);
+
+        return Expression.Lambda(lam.Type, body, lam.Parameters);
+    }
+
+    private static Expression AlignLambdaBodyToReturnType(Expression body, Type returnType)
+    {
+        if (body.Type == returnType) return body;
+
+        // direct assignable
+        if (returnType.IsAssignableFrom(body.Type))
+            return Expression.Convert(body, returnType);
+
+        // int -> int? 这类：T -> Nullable<T>
+        var nullableUnderlying = Nullable.GetUnderlyingType(returnType);
+        if (nullableUnderlying != null && body.Type == nullableUnderlying)
+            return Expression.Convert(body, returnType);
+
+        // 一般 numeric widening（可选：你也可以先不做，遇到再加）
+        // if (body.Type.IsValueType && returnType.IsValueType)
+        //     return Expression.Convert(body, returnType);
+
+        throw new InvalidOperationException(
+            $"Cannot align lambda body type {body.Type} to return type {returnType}.");
+    }
+    
+    private static Expression GetValueTupleItem(Expression tuple, int index /*1-based*/)
+    {
+        // ValueTuple uses fields: Item1, Item2, ...
+        var name = "Item" + index;
+        var field = tuple.Type.GetField(name);
+        if (field == null)
+            throw new InvalidOperationException($"Field '{name}' not found on {tuple.Type}.");
+        return Expression.Field(tuple, field);
+    }
+
+    /// <summary>
+    /// Build an IQueryable expression for a (possibly nested) CustomMemoryQueryExpression:
+    /// 1) Build the root IQueryable<TEntity> using QueryRows+Track (EF identity map reuse)
+    /// 2) Apply q.Steps in order to produce the final IQueryable
+    /// </summary>
+    private Expression BuildQueryableFromQueryExpression(
+        CustomMemoryQueryExpression q,
+        Type elementType,
+        ParameterExpression qcParam,
+        QueryParameterRewritingVisitor rewriter,
+        EntityQueryRootRewritingVisitor entityRootRewriter,
+        EfPropertyRewritingVisitor efPropRewriter)
+    {
+        // 1) Build root queryable (IQueryable<TEntity>) using your existing root builder.
+        // IMPORTANT: this must return IQueryable of elementType (not non-generic IQueryable).
+        // Assumption: q has an IEntityType (EF metadata) for elementType.
+        Expression sourceExpr = BuildQueryRowsEntityQueryable(elementType, qcParam, q.EntityType);
+        var currentElementType = elementType;
+
+        // 2) Apply steps (same order EF produced)
+        foreach (var step in q.Steps)
+        {
+            // Reuse your existing switch for Where/OrderBy/Select/SelectMany/Take/Skip etc.
+            // Only difference: we must call Rewrite(...) on step lambdas/bodies.
+            switch (step)
+            {
+                case WhereStep w:
+                {
+                    var whereOpen = QueryableWhere_NoIndex();
+                    var whereClosed = whereOpen.MakeGenericMethod(currentElementType);
+
+                    var body = w.Predicate.Body;
+                    body = rewriter.Visit(body)!;
+                    body = entityRootRewriter.Visit(body)!;
+                    body = efPropRewriter.Visit(body)!;
+
+                    var lam = Expression.Lambda(w.Predicate.Type, body, w.Predicate.Parameters);
+
+                    sourceExpr = Expression.Call(whereClosed, sourceExpr, Expression.Quote(lam));
+                    break;
+                }
+
+                case OrderStep ob:
+                {
+                    var keyBody = ob.KeySelector.Body;
+                    keyBody = rewriter.Visit(keyBody)!;
+                    keyBody = entityRootRewriter.Visit(keyBody)!;
+                    keyBody = efPropRewriter.Visit(keyBody)!;
+
+                    var keyLam = Expression.Lambda(ob.KeySelector.Type, keyBody, ob.KeySelector.Parameters);
+                    var keyType = keyLam.ReturnType;
+
+                    var name = ob.Descending ? nameof(Queryable.OrderByDescending) : nameof(Queryable.OrderBy);
+                    var orderOpen = GetQueryableMethod(name, genericArgCount: 2, 2);
+                    var orderClosed = orderOpen.MakeGenericMethod(currentElementType, keyType);
+
+                    sourceExpr = Expression.Call(orderClosed, sourceExpr, Expression.Quote(keyLam));
+                    break;
+                }
+
+                case SelectStep s:
+                {
+                    var body = s.Selector.Body;
+                    body = rewriter.Visit(body)!;
+                    body = entityRootRewriter.Visit(body)!;
+                    body = efPropRewriter.Visit(body)!;
+
+                    var lam = Expression.Lambda(s.Selector.Type, body, s.Selector.Parameters);
+
+                    var resultType = lam.ReturnType;
+
+                    var selectOpen = QueryableSelect_NoIndex();
+                    var selectClosed = selectOpen.MakeGenericMethod(currentElementType, resultType);
+
+                    sourceExpr = Expression.Call(selectClosed, sourceExpr, Expression.Quote(lam));
+                    currentElementType = resultType;
+                    break;
+                }
+
+                case SelectManyStep sm:
+                {
+                    Expression Rewrite(Expression expr)
+                    {
+                        expr = rewriter.Visit(expr)!;
+                        expr = entityRootRewriter.Visit(expr)!;
+                        expr = efPropRewriter.Visit(expr)!;
+                        return expr;
+                    }
+
+                    var outerType = currentElementType;
+
+                    // collectionSelector: Func<TOuter, IEnumerable<TCollection>>
+                    var colBody = Rewrite(sm.CollectionSelector.Body);
+                    var colElemType = TryGetIEnumerableElementType(colBody.Type)
+                                      ?? throw new InvalidOperationException(
+                                          $"SelectMany collectionSelector must return IEnumerable<T>. Type={colBody.Type}");
+
+                    var ienumCol = typeof(IEnumerable<>).MakeGenericType(colElemType);
+                    if (colBody.Type != ienumCol)
+                        colBody = Expression.Convert(colBody, ienumCol);
+
+                    var colDel = typeof(Func<,>).MakeGenericType(outerType, ienumCol);
+                    var colLam = Expression.Lambda(colDel, colBody, sm.CollectionSelector.Parameters);
+
+                    // resultSelector: Func<TOuter, TCollection, TResult>
+                    var resBody = Rewrite(sm.ResultSelector.Body);
+                    var resType = resBody.Type;
+
+                    var resDel = typeof(Func<,,>).MakeGenericType(outerType, colElemType, resType);
+                    var resLam = Expression.Lambda(resDel, resBody, sm.ResultSelector.Parameters);
+
+                    var selectManyOpen = GetQueryableMethod(nameof(Queryable.SelectMany), genericArgCount: 3, 3);
+                    var selectManyClosed = selectManyOpen.MakeGenericMethod(outerType, colElemType, resType);
+
+                    sourceExpr = Expression.Call(selectManyClosed, sourceExpr, Expression.Quote(colLam),
+                        Expression.Quote(resLam));
+                    currentElementType = resType;
+                    break;
+                }
+
+                case LeftJoinStep lj:
+                {
+                    // The LeftJoin step can appear inside a nested query too, so we just reuse the main case.
+                    // Easiest: call a local helper that uses the same code as the main switch case.
+                    sourceExpr = ApplyLeftJoinStep(
+                        sourceExpr,
+                        currentElementType,
+                        lj,
+                        qcParam,
+                        rewriter,
+                        entityRootRewriter,
+                        efPropRewriter,
+                        out currentElementType);
+                    break;
+                }
+
+                default:
+                    throw new NotSupportedException(
+                        $"Nested query step '{step.Kind}' not supported in BuildQueryableFromQueryExpression yet.");
+            }
+        }
+
+        return sourceExpr;
+    }
+
+    private static Type? TryGetIEnumerableElementType(Type type)
+    {
+        // string implements IEnumerable<char> but is NOT a collection in LINQ sense
+        if (type == typeof(string))
+            return null;
+
+        // IEnumerable<T>
+        if (type.IsGenericType &&
+            type.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+        {
+            return type.GetGenericArguments()[0];
+        }
+
+        // IQueryable<T>
+        if (type.IsGenericType &&
+            type.GetGenericTypeDefinition() == typeof(IQueryable<>))
+        {
+            return type.GetGenericArguments()[0];
+        }
+
+        // Look for IEnumerable<T> on interfaces
+        foreach (var iface in type.GetInterfaces())
+        {
+            if (iface.IsGenericType &&
+                iface.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+            {
+                return iface.GetGenericArguments()[0];
+            }
+        }
+
+        return null;
+    }
+
+    private Expression ApplyLeftJoinStep(
+        Expression sourceExpr,
+        Type currentElementType,
+        LeftJoinStep lj,
+        ParameterExpression qcParam,
+        QueryParameterRewritingVisitor rewriter,
+        EntityQueryRootRewritingVisitor entityRootRewriter,
+        EfPropertyRewritingVisitor efPropRewriter,
+        out Type newElementType)
+    {
+        var outerType = currentElementType;
+        var innerType = lj.InnerKeySelector.Parameters[0].Type;
+
+        var innerSourceExpr = BuildQueryableFromQueryExpression(
+            lj.InnerQuery,
+            innerType,
+            qcParam,
+            rewriter,
+            entityRootRewriter,
+            efPropRewriter);
+
+        var outerKey = RewriteLambda(lj.OuterKeySelector, rewriter, entityRootRewriter, efPropRewriter);
+        var innerKey = RewriteLambda(lj.InnerKeySelector, rewriter, entityRootRewriter, efPropRewriter);
+        var resultSel = RewriteLambda(lj.ResultSelector, rewriter, entityRootRewriter, efPropRewriter);
+
+        var keyType = outerKey.ReturnType;
+
+        var tupleType =
+            typeof(ValueTuple<,>).MakeGenericType(outerType, typeof(IEnumerable<>).MakeGenericType(innerType));
+        var tupleCtor = tupleType.GetConstructor(new[]
+        {
+            outerType,
+            typeof(IEnumerable<>).MakeGenericType(innerType)
+        })!;
+
+        var oParam = Expression.Parameter(outerType, "o");
+        var innersParam = Expression.Parameter(typeof(IEnumerable<>).MakeGenericType(innerType), "inners");
+
+        var groupJoinResultSelector = Expression.Lambda(
+            Expression.New(tupleCtor, oParam, innersParam),
+            oParam,
+            innersParam);
+
+        var groupJoinOpen = GetQueryableGroupJoin(withComparer: false);
+        var groupJoin = groupJoinOpen.MakeGenericMethod(outerType, innerType, keyType, tupleType);
+
+        var afterGroupJoin = Expression.Call(
+            groupJoin,
+            sourceExpr,
+            innerSourceExpr,
+            Expression.Quote(outerKey),
+            Expression.Quote(innerKey),
+            Expression.Quote(groupJoinResultSelector));
+
+        var tParam = Expression.Parameter(tupleType, "t");
+        var item1 = GetValueTupleItem(tParam, 1);
+        var item2 = GetValueTupleItem(tParam, 2);
+
+        var defaultIfEmptyOpen = typeof(Enumerable).GetMethods()
+            .Single(m => m.Name == nameof(Enumerable.DefaultIfEmpty)
+                         && m.IsGenericMethodDefinition
+                         && m.GetParameters().Length == 1);
+        var defaultIfEmpty = defaultIfEmptyOpen.MakeGenericMethod(innerType);
+
+        var defIfEmptyCall = Expression.Call(defaultIfEmpty, item2);
+        var collectionSelector = Expression.Lambda(defIfEmptyCall, tParam);
+
+        var iParam = Expression.Parameter(innerType, "i");
+        var invoked = Expression.Invoke(resultSel, item1, iParam);
+        var resSelector = Expression.Lambda(invoked, tParam, iParam);
+
+        var selectManyOpen = GetQueryableMethod(nameof(Queryable.SelectMany), genericArgCount: 3, 3);
+        var selectMany = selectManyOpen.MakeGenericMethod(tupleType, innerType, invoked.Type);
+
+        newElementType = invoked.Type;
+        return Expression.Call(selectMany, afterGroupJoin, Expression.Quote(collectionSelector),
+            Expression.Quote(resSelector));
+    }
+
+    private static MethodInfo QueryableSkip_NoIndex()
+    {
+        // IQueryable<TSource> Skip<TSource>(IQueryable<TSource>, int)
+        var m = typeof(Queryable).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(x => x.Name == nameof(Queryable.Skip) && x.IsGenericMethodDefinition)
+            .Where(x => x.GetGenericArguments().Length == 1)
+            .Single(x =>
+            {
+                var ps = x.GetParameters();
+                if (ps.Length != 2) return false;
+
+                // param0: IQueryable<TSource>
+                if (!ps[0].ParameterType.IsGenericType) return false;
+                if (ps[0].ParameterType.GetGenericTypeDefinition() != typeof(IQueryable<>)) return false;
+
+                // param1: int
+                return ps[1].ParameterType == typeof(int);
+            });
+
+        return m;
+    }
+
     private static MethodInfo GetQueryableAverageWithSelector(Type sourceType, Type valueType)
     {
         var candidates = typeof(Queryable)
@@ -590,7 +1171,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
             .Where(m => m.Name == nameof(Queryable.Average))
             .Where(m => m.IsGenericMethodDefinition)
             .Where(m => m.GetGenericArguments().Length == 1) // Average<TSource>(...)
-            .Where(m => m.GetParameters().Length == 2)       // (source, selector)
+            .Where(m => m.GetParameters().Length == 2) // (source, selector)
             .ToList();
 
         static Type? TryGetSelectorReturnType(MethodInfo m)
@@ -598,7 +1179,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
             var p1 = m.GetParameters()[1].ParameterType; // Expression<Func<TSource, X>>
             if (!p1.IsGenericType) return null;
 
-            var exprArg = p1.GetGenericArguments()[0];   // Func<TSource, X>
+            var exprArg = p1.GetGenericArguments()[0]; // Func<TSource, X>
             if (!exprArg.IsGenericType) return null;
 
             var funcArgs = exprArg.GetGenericArguments();
@@ -634,7 +1215,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         throw new InvalidOperationException(
             $"Average(selector) overload not found/ambiguous. source={sourceType}, value={valueType}, matches={matches.Count}");
     }
-    
+
     private static MethodInfo GetQueryableSumWithSelector(Type sourceType, Type valueType)
     {
         // Queryable.Sum<TSource>(IQueryable<TSource>, Expression<Func<TSource, X>>) 其中 X 是数值类型
@@ -910,57 +1491,53 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         return (IQueryable<SnapshotRow>)getter.Invoke(table, Array.Empty<object>())!;
     }
 
+    private static readonly MethodInfo GetTableGenericDef =
+        typeof(IMemoryDatabase)
+            .GetMethods()
+            .Single(m =>
+                m.Name == nameof(IMemoryDatabase.GetTable)
+                && m.IsGenericMethodDefinition // ✅只要 GetTable<TEntity>
+                && m.GetGenericArguments().Length == 1
+                && m.GetParameters().Length == 1
+                && m.GetParameters()[0].ParameterType == typeof(Type)
+                && m.ReturnType.IsGenericType
+                && m.ReturnType.GetGenericTypeDefinition() == typeof(IMemoryTable<>));
+
     // Used by EntityQueryRootRewritingVisitor to replace ctx.Set<T>() roots:
     // it must return IQueryable<T> AND it must be QueryRows-based (to keep QueryCalled==0).
-    private IQueryable BuildQueryRowsEntityQueryable(Type clrType, QueryContext qc, IEntityType efEntityType)
+    private Expression BuildQueryRowsEntityQueryable(Type clrType, Expression qcExpr, IEntityType efEntityType)
     {
-        var table = _db.GetType().GetMethods()
-            .Single(m => m.Name == "GetTable"
-                         && m.IsGenericMethodDefinition
-                         && m.GetParameters().Length == 1)
-            .MakeGenericMethod(clrType)
-            .Invoke(_db, new object[] { clrType })!;
+        // 1) tableExpr = _db.GetTable<TEntity>(typeof(TEntity))
+        var tableExpr = BuildTableExpression(clrType);
 
-        var rows = GetQueryRowsFromTable(table, clrType); // IQueryable<SnapshotRow>
-
-        // ✅ Use QueryContext PARAMETER (compile-time), NOT runtime instance
-        var qcParam = QueryCompilationContext.QueryContextParameter;
-
+        // 2) rowsExpr = tableExpr.QueryRows   (IQueryable<SnapshotRow>)
+        var rowsExpr = BuildQueryRowsExpression(tableExpr, clrType);
+        
+        // 3) rowsExpr.Select(r => TrackFromRow<TEntity>((QueryContext)qcExpr, efEntityType, r, _vbFactory, _materializerSource))
+        var rowParam = Expression.Parameter(typeof(SnapshotRow), "r");
+        
         var trackOpen = typeof(CustomMemoryShapedQueryCompilingExpressionVisitor)
             .GetMethod(nameof(TrackFromRow), BindingFlags.Static | BindingFlags.NonPublic)!;
         var trackClosed = trackOpen.MakeGenericMethod(clrType);
-
-        var rowParam = Expression.Parameter(typeof(SnapshotRow), "r");
-
-        var body = Expression.Call(
+        
+        // ✅ qcExpr 是 QueryCompilationContext.QueryContextParameter（类型就是 QueryContext）
+        var trackCall = Expression.Call(
             trackClosed,
-            qcParam,
+            qcExpr, // 关键：不要 Expression.Constant(null) / 也不要 runtime qc
             Expression.Constant(efEntityType, typeof(IEntityType)),
             rowParam,
             Expression.Constant(_vbFactory),
             Expression.Constant(_materializerSource));
-
+        
         var selector = Expression.Lambda(
             typeof(Func<,>).MakeGenericType(typeof(SnapshotRow), clrType),
-            body,
+            trackCall,
             rowParam);
 
         var selectMethod = QueryableSelect_NoIndex().MakeGenericMethod(typeof(SnapshotRow), clrType);
-
-        var selectExpr = Expression.Call(
-            selectMethod,
-            Expression.Constant(rows, typeof(IQueryable<SnapshotRow>)),
-            Expression.Quote(selector));
-
-        // ✅ CreateQuery<T> from the provider
-        var createQueryGeneric = rows.Provider.GetType().GetMethods()
-            .Single(m => m.Name == nameof(IQueryProvider.CreateQuery)
-                         && m.IsGenericMethodDefinition
-                         && m.GetParameters().Length == 1);
-
-        var createQueryClosed = createQueryGeneric.MakeGenericMethod(clrType);
-
-        return (IQueryable)createQueryClosed.Invoke(rows.Provider, new object[] { selectExpr })!;
+        
+        // 返回 IQueryable<clrType> 的表达式
+        return Expression.Call(selectMethod, rowsExpr, Expression.Quote(selector));
     }
 
     protected override Expression VisitShapedQuery(ShapedQueryExpression shapedQueryExpression)
@@ -974,9 +1551,29 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
 
 
         // NEW: QueryRows-based path (incremental rollout)
-        return CompileQueryRowsPipeline(q, shapedQueryExpression);
-    }
+        var executor =  CompileQueryRowsPipeline(q, shapedQueryExpression);
+        executor = new IncludeStrippingVisitor().Visit(executor)!;
 
+        DumpNonReducibleExtensions("FINAL executor", executor);
+        DumpNonReducibleExtensions("QueryExpression", shapedQueryExpression.QueryExpression);
+        DumpNonReducibleExtensions("ShaperExpression", shapedQueryExpression.ShaperExpression);
+        return executor;
+    }
+    
+    private sealed class IncludeStrippingVisitor : ExpressionVisitor
+    {
+        protected override Expression VisitExtension(Expression node)
+        {
+            if (node is IncludeExpression ie)
+            {
+                // 追踪 fixup 路线：我们只要 inner 被 materialize + tracked；
+                // IncludeExpression 本身不能留到最终 expression tree。
+                return Visit(ie.EntityExpression);
+            }
+            return base.VisitExtension(node);
+        }
+    }
+    
 // ③ 新增：把 List<T> 塞给 collection property（ICollection<T> / List<T> 都可）
     private static void SetCollectionProperty(object owner, PropertyInfo navProp, object list)
     {
@@ -1160,4 +1757,251 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
             return t.GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
         }
     }
+
+    private static Expression? FindFirstExtension(Expression expr)
+    {
+        Expression? found = null;
+        new ExtensionFinder(x => found ??= x).Visit(expr);
+        return found;
+    }
+
+    sealed class ExtensionFinder : ExpressionVisitor
+    {
+        private readonly Action<Expression> _hit;
+        public ExtensionFinder(Action<Expression> hit) => _hit = hit;
+
+        public override Expression Visit(Expression? node)
+        {
+            if (node != null && node.NodeType == ExpressionType.Extension)
+            {
+                _hit(node);
+                return node; // 立刻停
+            }
+            return base.Visit(node);
+        }
+    }
+    
+    // 放在类里（private static）
+    private static void DumpNonReducibleExtensions(string tag, Expression expr)
+    {
+        Console.WriteLine($"=== [DBG] NON-REDUCIBLE EXTENSIONS ({tag}) ===");
+        var v = new NonReducibleExtensionDumper();
+        v.Visit(expr);
+        if (v.Count == 0) Console.WriteLine("[DBG] (none)");
+        Console.WriteLine("=== [DBG] END ===");
+    }
+
+    private sealed class NonReducibleExtensionDumper : ExpressionVisitor
+    {
+        public int Count { get; private set; }
+
+        public override Expression Visit(Expression? node)
+        {
+            if (!node.CanReduce)
+            {
+                Count++;
+                Console.WriteLine($"[DBG] EXT#{Count}: type={node.GetType().FullName} clrType={node.Type} canReduce={node.CanReduce}");
+                Console.WriteLine($"        text={node}");
+                return node; // ✅ 不下钻
+            }
+
+            return base.VisitExtension(node);
+        }
+    }
 }
+
+
+public static class ExpressionDumper
+{
+    public static string Dump(Expression expr, int maxDepth = 40)
+    {
+        var sb = new StringBuilder(16_384);
+        DumpCore(expr, sb, 0, maxDepth, new HashSet<Expression>(ReferenceEqualityComparer.Instance));
+        return sb.ToString();
+    }
+
+    private static void DumpCore(Expression? e, StringBuilder sb, int depth, int maxDepth, HashSet<Expression> seen)
+    {
+        if (e == null)
+        {
+            Indent(sb, depth).AppendLine("<null>");
+            return;
+        }
+
+        if (depth > maxDepth)
+        {
+            Indent(sb, depth).AppendLine("... <maxDepth reached>");
+            return;
+        }
+
+        if (!seen.Add(e))
+        {
+            Indent(sb, depth).AppendLine($"<cycle> {e.NodeType} {e.Type}");
+            return;
+        }
+
+        var pad = Indent(sb, depth);
+
+        // Header line
+        pad.Append(e.NodeType).Append(" : ").Append(e.Type.FullName);
+
+        // Extra info for important node kinds
+        switch (e)
+        {
+            case MethodCallExpression mc:
+                sb.Append("  CALL ").Append(mc.Method.DeclaringType?.FullName).Append(".").Append(mc.Method.Name);
+                if (mc.Method.IsGenericMethod)
+                {
+                    var args = mc.Method.GetGenericArguments();
+                    sb.Append("<").Append(string.Join(",", args.Select(a => a.Name))).Append(">");
+                }
+                sb.Append("  params=").Append(mc.Arguments.Count);
+                sb.AppendLine();
+
+                if (mc.Object != null)
+                {
+                    Indent(sb, depth + 1).AppendLine("Object:");
+                    DumpCore(mc.Object, sb, depth + 2, maxDepth, seen);
+                }
+
+                for (int i = 0; i < mc.Arguments.Count; i++)
+                {
+                    Indent(sb, depth + 1).AppendLine($"Arg[{i}]:");
+                    DumpCore(mc.Arguments[i], sb, depth + 2, maxDepth, seen);
+                }
+                return;
+
+            case LambdaExpression lam:
+                sb.Append("  LAMBDA ").Append(lam.ReturnType.FullName)
+                  .Append("  params=").Append(lam.Parameters.Count).AppendLine();
+                for (int i = 0; i < lam.Parameters.Count; i++)
+                {
+                    var p = lam.Parameters[i];
+                    Indent(sb, depth + 1).AppendLine($"Param[{i}] {p.Type.FullName} {p.Name}");
+                }
+                Indent(sb, depth + 1).AppendLine("Body:");
+                DumpCore(lam.Body, sb, depth + 2, maxDepth, seen);
+                return;
+
+            case ParameterExpression p:
+                sb.Append("  PARAM ").Append(p.Name).AppendLine();
+                return;
+
+            case ConstantExpression c:
+                sb.Append("  CONST ").Append(c.Value == null ? "null" : c.Value.ToString()).AppendLine();
+                return;
+
+            case MemberExpression me:
+                sb.Append("  MEMBER ").Append(me.Member.DeclaringType?.FullName).Append(".").Append(me.Member.Name).AppendLine();
+                Indent(sb, depth + 1).AppendLine("Instance:");
+                DumpCore(me.Expression, sb, depth + 2, maxDepth, seen);
+                return;
+
+            case UnaryExpression u:
+                sb.Append("  UNARY ").Append(u.NodeType).AppendLine();
+                Indent(sb, depth + 1).AppendLine("Operand:");
+                DumpCore(u.Operand, sb, depth + 2, maxDepth, seen);
+                return;
+
+            case BinaryExpression b:
+                sb.Append("  BINARY ").Append(b.NodeType).AppendLine();
+                Indent(sb, depth + 1).AppendLine("Left:");
+                DumpCore(b.Left, sb, depth + 2, maxDepth, seen);
+                Indent(sb, depth + 1).AppendLine("Right:");
+                DumpCore(b.Right, sb, depth + 2, maxDepth, seen);
+                return;
+
+            case NewExpression ne:
+                sb.Append("  NEW ").Append(ne.Constructor?.DeclaringType?.FullName).AppendLine();
+                for (int i = 0; i < ne.Arguments.Count; i++)
+                {
+                    Indent(sb, depth + 1).AppendLine($"Arg[{i}]:");
+                    DumpCore(ne.Arguments[i], sb, depth + 2, maxDepth, seen);
+                }
+                return;
+
+            case ConditionalExpression ce:
+                sb.AppendLine("  CONDITIONAL");
+                Indent(sb, depth + 1).AppendLine("Test:");
+                DumpCore(ce.Test, sb, depth + 2, maxDepth, seen);
+                Indent(sb, depth + 1).AppendLine("IfTrue:");
+                DumpCore(ce.IfTrue, sb, depth + 2, maxDepth, seen);
+                Indent(sb, depth + 1).AppendLine("IfFalse:");
+                DumpCore(ce.IfFalse, sb, depth + 2, maxDepth, seen);
+                return;
+
+            case BlockExpression be:
+                sb.Append("  BLOCK vars=").Append(be.Variables.Count).Append(" exprs=").Append(be.Expressions.Count).AppendLine();
+                for (int i = 0; i < be.Variables.Count; i++)
+                {
+                    var v = be.Variables[i];
+                    Indent(sb, depth + 1).AppendLine($"Var[{i}] {v.Type.FullName} {v.Name}");
+                }
+                for (int i = 0; i < be.Expressions.Count; i++)
+                {
+                    Indent(sb, depth + 1).AppendLine($"Expr[{i}]:");
+                    DumpCore(be.Expressions[i], sb, depth + 2, maxDepth, seen);
+                }
+                return;
+
+            case NewArrayExpression nae:
+                sb.Append("  NEWARRAY count=").Append(nae.Expressions.Count).AppendLine();
+                for (int i = 0; i < nae.Expressions.Count; i++)
+                {
+                    Indent(sb, depth + 1).AppendLine($"Elem[{i}]:");
+                    DumpCore(nae.Expressions[i], sb, depth + 2, maxDepth, seen);
+                }
+                return;
+
+            default:
+                break;
+        }
+
+        // The important part: Extension nodes (EF Core special nodes)
+        if (e.NodeType == ExpressionType.Extension)
+        {
+            // Most EF Core nodes end up here.
+            // We want type name + reducibility.
+            bool canReduce = false;
+            try { canReduce = e.CanReduce; } catch { /* ignore */ }
+
+            sb.Append("  EXT ").Append(e.GetType().FullName)
+              .Append("  CanReduce=").Append(canReduce)
+              .AppendLine();
+
+            // Try to reduce once (safe) just to see what it would become.
+            if (canReduce)
+            {
+                try
+                {
+                    var reduced = e.Reduce();
+                    Indent(sb, depth + 1).AppendLine("ReducedTo:");
+                    DumpCore(reduced, sb, depth + 2, maxDepth, seen);
+                }
+                catch (Exception ex)
+                {
+                    Indent(sb, depth + 1).AppendLine($"Reduce() threw: {ex.GetType().Name} {ex.Message}");
+                }
+            }
+
+            return;
+        }
+
+        sb.AppendLine();
+    }
+
+    private static StringBuilder Indent(StringBuilder sb, int depth)
+    {
+        sb.Append(' ', depth * 2);
+        return sb;
+    }
+
+    // Reference equality comparer for Expression nodes
+    private sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+    {
+        public static readonly ReferenceEqualityComparer Instance = new();
+        public new bool Equals(object? x, object? y) => ReferenceEquals(x, y);
+        public int GetHashCode(object obj) => RuntimeHelpers.GetHashCode(obj);
+    }
+}
+

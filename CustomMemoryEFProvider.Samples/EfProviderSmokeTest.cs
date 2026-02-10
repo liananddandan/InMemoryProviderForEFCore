@@ -200,7 +200,7 @@ public sealed class EfProviderSmokeTest
             
             var memDb1 = ctx1.GetService<IMemoryDatabase>();
             var t1 = memDb1.GetTable<TestEntity>(typeof(TestEntity));
-            Console.WriteLine($"[CTX1 AFTER ADD] query count = {t1.Query.Count()}");
+            Console.WriteLine($"[CTX1 AFTER ADD] query count = {t1.QueryRows.Count()}");
             id = e.Id;
             Console.WriteLine($"CTX1 ADD: id={id}");
         }
