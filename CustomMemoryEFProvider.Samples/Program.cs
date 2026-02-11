@@ -35,8 +35,8 @@ try
     // EfProviderWhereSelectSmokeTest.Run(sp);
     // EfProviderOrderBySmokeTest.Run(sp);
     // EfProviderSkipTakeSmokeTest.Run(sp);
-    EfProviderIncludeReferenceSmokeTest.Run(sp);
-    // EfProviderIncludeCollectionSmokeTest.Run(sp);
+    // EfProviderIncludeReferenceSmokeTest.Run(sp);
+    EfProviderIncludeCollectionSmokeTest.Run();
     // EfProviderIncludeNestedSmokeTest.Run(sp);
     // IdentityResolutionProblemSmokeTest.Run(sp);
     // QueryRowsSmokeTest.Run(sp);

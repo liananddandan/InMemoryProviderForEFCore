@@ -21,5 +21,9 @@ public class BlogConfig : IEntityTypeConfiguration<Blog>
         builder.HasMany(x => x.Posts)
             .WithOne(x => x.Blog)
             .HasForeignKey(x => x.BlogId);
+        
+        builder.HasMany(x => x.Notes)
+            .WithOne(b => b.Blog)
+            .HasForeignKey(x => x.BlogId); 
     }
 }

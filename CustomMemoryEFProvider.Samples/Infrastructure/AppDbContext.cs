@@ -13,8 +13,8 @@ public class AppDbContext : DbContext
     public DbSet<BlogDetail> BlogDetails => Set<BlogDetail>();
     public DbSet<BlogPost> BlogPosts => Set<BlogPost>();
     public DbSet<PostComment> PostComments => Set<PostComment>();
+    public DbSet<BlogNote> BlogNotes => Set<BlogNote>();
     
-    // ✅ 核心修复：添加带 DbContextOptions 的构造函数（必须传给基类）
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
 
     // 保留无参构造（可选，兜底用）

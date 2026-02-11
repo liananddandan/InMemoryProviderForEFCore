@@ -7,4 +7,7 @@ public class Blog
     public BlogDetail? Detail { get; set; }
     
     public ICollection<BlogPost>? Posts { get; set; } = new List<BlogPost>();
+    
+    public ICollection<BlogNote> Notes { get; set; } = new List<BlogNote>();
+
 }

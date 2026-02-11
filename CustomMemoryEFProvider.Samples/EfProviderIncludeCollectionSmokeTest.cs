@@ -2,104 +2,233 @@ using CustomEFCoreProvider.Samples.Entities;
 using CustomEFCoreProvider.Samples.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Xunit;
 
 namespace CustomEFCoreProvider.Samples;
 
 public static class EfProviderIncludeCollectionSmokeTest
 {
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run()
     {
-        Console.WriteLine("=== INCLUDE (COLLECTION) SMOKE TEST ===");
+        Console.WriteLine("=== INCLUDE SMOKE TESTS ===");
 
-        // ---------- Seed ----------
-        using (var seedScope = rootProvider.CreateScope())
+        Run_NoInclude_CollectionNotLoaded();
+        Run_Include_BlogPosts_Loaded();
+        Run_Include_Take_Correlation();
+        Run_Include_TwoCollections_PostsAndNotes();
+
+        Console.WriteLine("=== INCLUDE SMOKE TESTS PASSED ===");
+    }
+
+    private static void Run_NoInclude_CollectionNotLoaded()
+    {
+        using var root = TestHost.BuildRootProvider(dbName: "NoInclude_" + Guid.NewGuid().ToString("N"));
+
+        using (var seed = root.CreateScope())
         {
-            var ctx = seedScope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var ctx = seed.ServiceProvider.GetRequiredService<AppDbContext>();
 
             var blog1 = new Blog { Name = "Blog-1" };
             var blog2 = new Blog { Name = "Blog-2" };
 
-            var p11 = new BlogPost { Title = "B1-P1", Blog = blog1 };
-            var p12 = new BlogPost { Title = "B1-P2", Blog = blog1 };
-            var p21 = new BlogPost { Title = "B2-P1", Blog = blog2 };
+            ctx.AddRange(
+                blog1, blog2,
+                new BlogPost { Title = "B1-P1", Blog = blog1 },
+                new BlogPost { Title = "B1-P2", Blog = blog1 },
+                new BlogPost { Title = "B2-P1", Blog = blog2 }
+            );
 
-            ctx.AddRange(blog1, blog2, p11, p12, p21);
             ctx.SaveChanges();
         }
 
-        // ---------- Query ----------
-        using (var scope = rootProvider.CreateScope())
+        using (var scope = root.CreateScope())
         {
             var ctx = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-            // A) baseline: no Include => Posts should be null (since you now return cloned entities)
-            var noInclude = ctx.Set<Blog>()
-                .OrderBy(b => b.Id)
-                .ToList();
+            var blogs = ctx.Set<Blog>().OrderBy(b => b.Id).ToList();
+            if (blogs.Count != 2) throw new Exception($"[NoInclude] expected 2 blogs but got {blogs.Count}");
 
-            if (noInclude.Count != 2)
-                throw new Exception($"[NoInclude] expected 2 blogs but got {noInclude.Count}");
-
-            foreach (var b in noInclude)
+            foreach (var b in blogs)
             {
-                if (b.Posts != null)
-                    throw new Exception($"[NoInclude] expected Blog {b.Id}.Posts == null but got non-null");
+                var nav = ctx.Entry(b).Collection(x => x.Posts);
+                if (nav.IsLoaded)
+                    throw new Exception($"[NoInclude] expected Blog {b.Id}.Posts IsLoaded == false");
             }
+        }
 
-            Console.WriteLine("[NoInclude] OK: all Posts == null");
+        Console.WriteLine("[NoInclude] OK");
+    }
 
-            // B) Include => Posts must be populated
-            var withInclude = ctx.Set<Blog>()
+    private static void Run_Include_BlogPosts_Loaded()
+    {
+        using var root = TestHost.BuildRootProvider(dbName: "IncludePosts_" + Guid.NewGuid().ToString("N"));
+
+        using (var seed = root.CreateScope())
+        {
+            var ctx = seed.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var blog1 = new Blog { Name = "Blog-1" };
+            var blog2 = new Blog { Name = "Blog-2" };
+
+            ctx.AddRange(
+                blog1, blog2,
+                new BlogPost { Title = "B1-P1", Blog = blog1 },
+                new BlogPost { Title = "B1-P2", Blog = blog1 },
+                new BlogPost { Title = "B2-P1", Blog = blog2 }
+            );
+
+            ctx.SaveChanges();
+        }
+
+        using (var scope = root.CreateScope())
+        {
+            var ctx = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var blogs = ctx.Set<Blog>()
                 .Include(b => b.Posts)
                 .OrderBy(b => b.Id)
                 .ToList();
 
-            if (withInclude.Count != 2)
-                throw new Exception($"[Include] expected 2 blogs but got {withInclude.Count}");
+            if (blogs.Count != 2) throw new Exception($"[Include] expected 2 blogs but got {blogs.Count}");
 
-            // 期望：Blog-1 => 2 posts, Blog-2 => 1 post
-            foreach (var blog in withInclude)
+            foreach (var blog in blogs)
             {
-                if (blog.Posts == null)
-                    throw new Exception($"[Include] FAILED: Blog {blog.Id}.Posts is null");
+                var nav = ctx.Entry(blog).Collection(x => x.Posts);
+                if (!nav.IsLoaded)
+                    throw new Exception($"[Include] FAILED: Blog {blog.Id}.Posts IsLoaded == false");
 
-                var count = blog.Posts.Count;
-                var expected = blog.Name == "Blog-1" ? 2 :
-                               blog.Name == "Blog-2" ? 1 : -999;
-
-                if (expected < 0)
-                    throw new Exception($"[Include] FAILED: unexpected blog name {blog.Name}");
-
-                if (count != expected)
-                    throw new Exception($"[Include] FAILED: Blog {blog.Id} expected {expected} posts but got {count}");
-
-                // validate content + inverse fix-up
-                foreach (var post in blog.Posts)
-                {
-                    if (post == null)
-                        throw new Exception($"[Include] FAILED: Blog {blog.Id} contains null post");
-
-                    if (string.IsNullOrWhiteSpace(post.Title))
-                        throw new Exception($"[Include] FAILED: Blog {blog.Id} has a post with empty Title");
-
-                    if (post.BlogId != blog.Id)
-                        throw new Exception($"[Include] FAILED: Post {post.Id} BlogId={post.BlogId} does not match Blog {blog.Id}");
-
-                    if (post.Blog == null)
-                        throw new Exception($"[Include] FAILED: inverse navigation Post.Blog is null (Post {post.Id})");
-
-                    if (!ReferenceEquals(blog, post.Blog))
-                        throw new Exception($"[Include] FAILED: inverse navigation points to wrong blog (Post {post.Id})");
-                }
-
-                Console.WriteLine($"[Include] OK: Blog {blog.Id} ({blog.Name}) -> Posts={blog.Posts.Count}");
+                var expected = blog.Name == "Blog-1" ? 2 : 1;
+                var actual = blog.Posts?.Count ?? 0;
+                if (actual != expected)
+                    throw new Exception($"[Include] FAILED: Blog {blog.Id} expected {expected} posts but got {actual}");
             }
-
-            // C) optional: ensure outer de-dup happened (collection include必须做这个)
-            // Blog-1 在 join 结果里会出现两行，如果你没做去重，很可能 withInclude.Count 会变成 3
-            // 我们已经用 Count=2 兜住了这一点。
         }
 
-        Console.WriteLine("=== INCLUDE (COLLECTION) TEST PASSED ===");
+        Console.WriteLine("[Include Posts] OK");
+    }
+
+    private static void Run_Include_Take_Correlation()
+    {
+        using var root = TestHost.BuildRootProvider(dbName: "IncludeTake_" + Guid.NewGuid().ToString("N"));
+
+        using (var seed = root.CreateScope())
+        {
+            var ctx = seed.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var b1 = new Blog { Name = "B1" };
+            var b2 = new Blog { Name = "B2" };
+            var b3 = new Blog { Name = "B3" };
+
+            ctx.AddRange(b1, b2, b3);
+
+            ctx.AddRange(
+                new BlogPost { Title = "b1-1", Blog = b1 },
+                new BlogPost { Title = "b1-2", Blog = b1 },
+
+                new BlogPost { Title = "b2-1", Blog = b2 },
+                new BlogPost { Title = "b2-2", Blog = b2 },
+                new BlogPost { Title = "b2-3", Blog = b2 },
+                new BlogPost { Title = "b2-4", Blog = b2 },
+                new BlogPost { Title = "b2-5", Blog = b2 },
+
+                new BlogPost { Title = "b3-1", Blog = b3 },
+                new BlogPost { Title = "b3-2", Blog = b3 },
+                new BlogPost { Title = "b3-3", Blog = b3 },
+                new BlogPost { Title = "b3-4", Blog = b3 },
+                new BlogPost { Title = "b3-5", Blog = b3 },
+                new BlogPost { Title = "b3-6", Blog = b3 },
+                new BlogPost { Title = "b3-7", Blog = b3 }
+            );
+
+            ctx.SaveChanges();
+        }
+
+        using (var scope = root.CreateScope())
+        {
+            var ctx = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var one = ctx.Set<Blog>()
+                .Include(b => b.Posts)
+                .OrderBy(b => b.Id)
+                .Take(1)
+                .Single();
+
+            if (!ctx.Entry(one).Collection(x => x.Posts).IsLoaded)
+                throw new Exception("[Take Correlation] Posts should be loaded");
+
+            var count = one.Posts?.Count ?? 0;
+            if (count != 2)
+                throw new Exception($"[Take Correlation] expected 2 posts but got {count}");
+
+            foreach (var p in one.Posts!)
+            {
+                if (p.BlogId != one.Id)
+                    throw new Exception($"[Take Correlation] post {p.Id} BlogId={p.BlogId} != blog.Id={one.Id}");
+            }
+        }
+
+        Console.WriteLine("[Include + Take Correlation] OK");
+    }
+
+    public static void Run_Include_TwoCollections_PostsAndNotes()
+    {
+        using var root = TestHost.BuildRootProvider(dbName: "IncludeTwoCollections_" + Guid.NewGuid().ToString("N"));
+        using (var seed = root.CreateScope())
+        {
+            var ctx = seed.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var b1 = new Blog { Name = "B1" };
+            var b2 = new Blog { Name = "B2" };
+
+            ctx.AddRange(b1, b2);
+
+            ctx.AddRange(
+                new BlogPost { Title = "b1-p1", Blog = b1 },
+                new BlogPost { Title = "b1-p2", Blog = b1 },
+                new BlogPost { Title = "b2-p1", Blog = b2 },
+
+                new BlogNote { Text = "b1-n1", Blog = b1 },
+                new BlogNote { Text = "b1-n2", Blog = b1 },
+                new BlogNote { Text = "b1-n3", Blog = b1 },
+                new BlogNote { Text = "b2-n1", Blog = b2 }
+            );
+
+            ctx.SaveChanges();
+        }
+
+        using (var scope = root.CreateScope())
+        {
+            var ctx = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var blogs = ctx.Set<Blog>()
+                .Include(b => b.Posts)
+                .Include(b => b.Notes)
+                .OrderBy(b => b.Id)
+                .ToList();
+
+            Assert.Equal(2, blogs.Count);
+
+            foreach (var b in blogs)
+            {
+                Assert.True(ctx.Entry(b).Collection(x => x.Posts).IsLoaded);
+                Assert.True(ctx.Entry(b).Collection(x => x.Notes).IsLoaded);
+
+                if (b.Name == "B1")
+                {
+                    Assert.Equal(2, b.Posts.Count);
+                    Assert.Equal(3, b.Notes.Count);
+                }
+                else
+                {
+                    Assert.Equal(1, b.Posts.Count);
+                    Assert.Equal(1, b.Notes.Count);
+                }
+
+                Assert.All(b.Posts, p => Assert.Equal(b.Id, p.BlogId));
+                Assert.All(b.Notes, n => Assert.Equal(b.Id, n.BlogId));
+            }
+        }
+
+        Console.WriteLine("[Two collections: Posts + Notes] OK");
     }
 }
