@@ -7,9 +7,10 @@ namespace CustomEFCoreProvider.Samples;
 
 public static class EfProviderIncludeReferenceSmokeTest
 {
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run()
     {
         Console.WriteLine("=== INCLUDE (REFERENCE) SMOKE TEST ===");
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderIncludeReference_" + Guid.NewGuid().ToString("N"));
 
         // ---------- Seed ----------
         using (var seedScope = rootProvider.CreateScope())

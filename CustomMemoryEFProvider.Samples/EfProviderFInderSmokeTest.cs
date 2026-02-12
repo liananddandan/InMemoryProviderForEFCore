@@ -7,9 +7,10 @@ namespace CustomEFCoreProvider.Samples;
 
 public static class EfProviderFinderSmokeTest
 {
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run( )
     {
         Console.WriteLine("=== FINDER SMOKE TEST ===");
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderFInder_" + Guid.NewGuid().ToString("N"));
 
         int id;
 
@@ -63,6 +64,6 @@ public static class EfProviderFinderSmokeTest
             Console.WriteLine($"CTX3: Find missing => {(missing == null ? "NULL (expected)" : "UNEXPECTED")}");
         }
 
-        Console.WriteLine("=== FINDER SMOKE TEST END ===");
+        Console.WriteLine("===✅✅✅✅✅✅ FINDER SMOKE TEST END ===");
     }
 }

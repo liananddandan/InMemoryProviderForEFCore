@@ -6,9 +6,10 @@ namespace CustomEFCoreProvider.Samples;
 
 public static class EfProviderSkipTakeSmokeTest
 {
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run()
     {
         Console.WriteLine("=== SKIP / TAKE SMOKE TEST ===");
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderSkipTake_" + Guid.NewGuid().ToString("N"));
 
         // ---------- Seed ----------
         // 注意：如果你的 provider 不会清库，多次运行会累加。

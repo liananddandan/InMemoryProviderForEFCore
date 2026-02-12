@@ -9,9 +9,10 @@ namespace CustomEFCoreProvider.Samples;
 
 public static class EfProviderImmediateExecutionSmokeTest
 {
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run()
     {
         Console.WriteLine("=== IMMEDIATE OPS SMOKE TEST ===");
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderImmediate_" + Guid.NewGuid().ToString("N"));
 
         int seedMinId;
         int seedMaxId;
@@ -144,7 +145,7 @@ public static class EfProviderImmediateExecutionSmokeTest
                 () => set.SingleOrDefault(x => x.Id >= seedMinId && x.Id <= seedMaxId),
                 "SingleOrDefault(seed-range) should throw InvalidOperationException because multiple rows exist.");
 
-            Console.WriteLine("✅ IMMEDIATE OPS SMOKE TEST PASSED");
+            Console.WriteLine("✅✅✅✅✅✅ IMMEDIATE OPS SMOKE TEST PASSED");
         }
 
         Console.WriteLine("=== END ===");

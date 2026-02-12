@@ -7,9 +7,10 @@ namespace CustomEFCoreProvider.Samples;
 
 public static class IdentityResolutionProblemSmokeTest
 {
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run()
     {
         Console.WriteLine("=== IDENTITY ACROSS QUERIES SMOKE TEST ===");
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderIdentityResoltution_" + Guid.NewGuid().ToString("N"));
 
         // ---------- Seed (deterministic) ----------
         using (var seedScope = rootProvider.CreateScope())

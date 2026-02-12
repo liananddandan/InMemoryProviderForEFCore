@@ -3,6 +3,7 @@ using System.Reflection;
 using CustomMemoryEFProvider.Core.Diagnostics;
 using CustomMemoryEFProvider.Core.Implementations;
 using CustomMemoryEFProvider.Core.Interfaces;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -300,26 +301,49 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
     static IncludeExpression? FindInclude(Expression e)
     {
         IncludeExpression? found = null;
-        new Finder(x => found ??= x).Visit(e);
+
+        new FindIncludeVisitor(x =>
+        {
+            if (found == null) found = x;
+        }).Visit(e);
+
         return found;
     }
 
-    sealed class Finder : ExpressionVisitor
+    sealed class FindIncludeVisitor : ExpressionVisitor
     {
-        private readonly Action<IncludeExpression> _hit;
-        public Finder(Action<IncludeExpression> hit) => _hit = hit;
+        private readonly Action<IncludeExpression> _onFound;
+
+        public FindIncludeVisitor(Action<IncludeExpression> onFound) => _onFound = onFound;
 
         protected override Expression VisitExtension(Expression node)
         {
-            if (node is IncludeExpression ie) _hit(ie);
+            // ✅关键：IncludeExpression 是 Extension 且 CanReduce=false
+            if (node is IncludeExpression ie)
+            {
+                _onFound(ie);
+
+                // 继续向下找嵌套 theninclude：ie.EntityExpression 里可能还有 IncludeExpression
+                Visit(ie.EntityExpression);
+                Visit(ie.NavigationExpression);
+                return node;
+            }
+
+            // MaterializeCollectionNavigationExpression 也是 Extension
+            if (node is MaterializeCollectionNavigationExpression mc)
+            {
+                // mc.Subquery 里也可能有 IncludeExpression
+                Visit(mc.Subquery);
+                return node;
+            }
+
             return base.VisitExtension(node);
         }
     }
 
 // ---------- MAIN: QueryRows pipeline compiler ----------
     private Expression CompileQueryRowsPipeline(
-        CustomMemoryQueryExpression q,
-        ShapedQueryExpression shapedQueryExpression)
+        CustomMemoryQueryExpression q)
     {
         // We only support "sequence" queries here (no scalar terminals) for now.
         // if (q.TerminalOperator != CustomMemoryTerminalOperator.None)
@@ -339,11 +363,13 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         // 2) SnapshotRow -> ValueBuffer (NO entity creation here)
         var rowParam = Expression.Parameter(typeof(SnapshotRow), "row");
 
-        var trackOpen = typeof(CustomMemoryShapedQueryCompilingExpressionVisitor)
-            .GetMethod(nameof(TrackFromRow), BindingFlags.Static | BindingFlags.NonPublic)!;
-        var trackClosed = trackOpen.MakeGenericMethod(clrType);
+        // var trackOpen = typeof(CustomMemoryShapedQueryCompilingExpressionVisitor)
+        //     .GetMethodÏ(nameÏof(TrackFromRow), BindingFlags.Static | BindingFlags.NonPublic)!;
+        // var trackClosed = trackOpen.MakeGenericMethod(clrType);
+        var rowToEntity = GetRowMaterializerMethod(clrType);
+
         var trackCall = Expression.Call(
-            trackClosed,
+            rowToEntity,
             qcParam,
             Expression.Constant(entityType, typeof(IEntityType)),
             rowParam,
@@ -454,7 +480,35 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                             expr = rewriter.Visit(expr)!;
                             expr = entityRootRewriter.Visit(expr)!;
                             expr = efPropRewriter.Visit(expr)!;
+
+                            if (expr is ShapedQueryExpression sqe)
+                                expr = VisitShapedQuery(sqe);
+                            else if (expr is CustomMemoryQueryExpression cmqe)
+                                expr = CompileQueryRowsPipeline(cmqe);
+                            expr = IncludeInQueryRewriting.RewriteSelectLambdas(
+                                expr,
+                                QueryCompilationContext.QueryContextParameter,
+                                RewriteSubquery);
+                            // Console.WriteLine("[DBG] subqueryExpr = " + expr);
+
                             return expr;
+                        }
+
+                        static Type? TryGetElementType(Type t)
+                        {
+                            if (t.IsGenericType)
+                            {
+                                var def = t.GetGenericTypeDefinition();
+                                if (def == typeof(IEnumerable<>) || def == typeof(IQueryable<>))
+                                    return t.GetGenericArguments()[0];
+                            }
+
+                            var iface = t.GetInterfaces().FirstOrDefault(i =>
+                                i.IsGenericType &&
+                                (i.GetGenericTypeDefinition() == typeof(IEnumerable<>)
+                                 || i.GetGenericTypeDefinition() == typeof(IQueryable<>)));
+
+                            return iface?.GetGenericArguments()[0];
                         }
 
                         rewrittenSelector = IncludeRewriting.RewriteIncludeSelector(
@@ -463,7 +517,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                             RewriteSubquery);
                     }
 
-                    // 3) 再拼 Select
+                    // 3) Select
                     var selectClosed = selectOpen.MakeGenericMethod(currentElementType, rewrittenSelector.ReturnType);
                     sourceExpr = Expression.Call(selectClosed, sourceExpr, Expression.Quote(rewrittenSelector));
                     currentElementType = rewrittenSelector.ReturnType;
@@ -517,9 +571,6 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
 
                 case LeftJoinStep lj:
                 {
-                    Console.WriteLine("=== [DBG] LEFTJOIN ENTER ===");
-                    Console.WriteLine("[DBG] sourceExpr BEFORE = " + sourceExpr);
-
                     // OUTER = currentElementType
                     var outerType = currentElementType;
 
@@ -628,8 +679,8 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                         Expression.Quote(resSelector));
 
                     currentElementType = invoked.Type;
-                    Console.WriteLine("=== [DBG] LEFTJOIN AFTER sourceExpr ===");
-                    Console.WriteLine(sourceExpr.ToString());
+                    // Console.WriteLine("=== [DBG] LEFTJOIN AFTER sourceExpr ===");
+                    // Console.WriteLine(sourceExpr.ToString());
 
                     var ext = FindFirstExtension(sourceExpr);
                     if (ext != null)
@@ -1674,13 +1725,14 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         // 3) rowsExpr.Select(r => TrackFromRow<TEntity>((QueryContext)qcExpr, efEntityType, r, _vbFactory, _materializerSource))
         var rowParam = Expression.Parameter(typeof(SnapshotRow), "r");
 
-        var trackOpen = typeof(CustomMemoryShapedQueryCompilingExpressionVisitor)
-            .GetMethod(nameof(TrackFromRow), BindingFlags.Static | BindingFlags.NonPublic)!;
-        var trackClosed = trackOpen.MakeGenericMethod(clrType);
+        // var trackOpen = typeof(CustomMemoryShapedQueryCompilingExpressionVisitor)
+        //     .GetMethod(nameof(TrackFromRow), BindingFlags.Static | BindingFlags.NonPublic)!;
+        // var trackClosed = trackOpen.MakeGenericMethod(clrType);
+        var rowToEntity = GetRowMaterializerMethod(clrType);
 
         // ✅ qcExpr 是 QueryCompilationContext.QueryContextParameter（类型就是 QueryContext）
         var trackCall = Expression.Call(
-            trackClosed,
+            rowToEntity,
             qcExpr, // 关键：不要 Expression.Constant(null) / 也不要 runtime qc
             Expression.Constant(efEntityType, typeof(IEntityType)),
             rowParam,
@@ -1762,7 +1814,7 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
         var includeNavs = ExtractIncludeNavigationNames(shapedQueryExpression.ShaperExpression);
         var includeNavArrayExpr = Expression.Constant(includeNavs.Distinct().ToArray(), typeof(string[]));
         // NEW: QueryRows-based path (incremental rollout)
-        var executor = CompileQueryRowsPipeline(q, shapedQueryExpression);
+        var executor = CompileQueryRowsPipeline(q);
         // executor = new IncludeStrippingVisitor().Visit(executor)!;
         executor = ApplyMarkLoadedWrapper(executor, QueryCompilationContext.QueryContextParameter, includeNavArrayExpr);
 
@@ -2096,10 +2148,41 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                 Console.WriteLine(
                     $"[DBG] EXT#{Count}: type={node.GetType().FullName} clrType={node.Type} canReduce={node.CanReduce}");
                 Console.WriteLine($"        text={node}");
-                return node; // ✅ 不下钻
+                return node;
             }
 
             return base.VisitExtension(node);
         }
+    }
+    
+    private static TEntity MaterializeFromRow<TEntity>(
+        QueryContext qc,
+        IEntityType entityType,
+        SnapshotRow row,
+        SnapshotValueBufferFactory factory,
+        IEntityMaterializerSource materializerSource)
+        where TEntity : class
+    {
+        // 不 InitializeStateManager，不 TryGetEntry，不 StartTracking
+        var vb = factory.Create(entityType, row.Snapshot);
+
+        var materializer = materializerSource.GetMaterializer(entityType);
+        var mc = new MaterializationContext(vb, qc.Context);
+        return (TEntity)materializer(mc);
+    }
+    
+    private MethodInfo GetRowMaterializerMethod(Type clrType)
+    {
+        // 你只说“支持 AsNoTracking”，那就只分 TrackAll vs NoTracking
+        // 如果以后想支持 NoTrackingWithIdentityResolution，再加一支。
+        var behavior = QueryCompilationContext.QueryTrackingBehavior;
+
+        var open = behavior == QueryTrackingBehavior.TrackAll
+            ? typeof(CustomMemoryShapedQueryCompilingExpressionVisitor)
+                .GetMethod(nameof(TrackFromRow), BindingFlags.Static | BindingFlags.NonPublic)!
+            : typeof(CustomMemoryShapedQueryCompilingExpressionVisitor)
+                .GetMethod(nameof(MaterializeFromRow), BindingFlags.Static | BindingFlags.NonPublic)!;
+
+        return open.MakeGenericMethod(clrType);
     }
 }

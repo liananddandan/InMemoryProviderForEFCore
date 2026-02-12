@@ -186,8 +186,6 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
 
     public int SaveChanges()
     {
-        Console.WriteLine($"[Table SaveChanges] tableType={_entityType.FullName} this={GetHashCode()} " +
-                          $"pending={_pendingChanges.Count} committedBefore={_committedData.Count}");
         int changedCount = 0;
         foreach (var (key, (snap, state)) in _pendingChanges)
         {
@@ -208,9 +206,6 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
         }
 
         _pendingChanges.Clear();
-        Console.WriteLine(
-            $"[Table SaveChanges] tableType={_entityType.FullName} this={GetHashCode()} committedAfter={_committedData.Count}");
-
         return changedCount;
     }
 

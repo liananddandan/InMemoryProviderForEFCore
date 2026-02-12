@@ -115,7 +115,7 @@ public class MemoryDatabase : IMemoryDatabase
         var table = (IMemoryTable<TEntity>)_tables.GetOrAdd(actualEntityType, type =>
         {
             var t = Activator.CreateInstance(typeof(MemoryTable<>).MakeGenericType(type), type)!;
-            Console.WriteLine($"[Create BaseTable] type={type.FullName} tableObjHash={t.GetHashCode()}");
+            // Console.WriteLine($"[Create BaseTable] type={type.FullName} tableObjHash={t.GetHashCode()}");
             return t;
         });
 
@@ -192,7 +192,7 @@ public class MemoryDatabase : IMemoryDatabase
     private object CreateTableInstance(Type clrType)
     {
         var obj = Activator.CreateInstance(typeof(MemoryTable<>).MakeGenericType(clrType), clrType)!;
-        Console.WriteLine($"[Create BaseTable] type={clrType.FullName} tableObjHash={obj.GetHashCode()}");
+        // Console.WriteLine($"[Create BaseTable] type={clrType.FullName} tableObjHash={obj.GetHashCode()}");
         return obj;
     }
     

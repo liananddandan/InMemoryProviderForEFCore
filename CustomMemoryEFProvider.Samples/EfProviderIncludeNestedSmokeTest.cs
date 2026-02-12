@@ -7,10 +7,11 @@ namespace CustomEFCoreProvider.Samples;
 
 public static class EfProviderIncludeNestedSmokeTest
 {
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run()
     {
         Console.WriteLine("=== INCLUDE (NESTED + MULTIPLE) SMOKE TEST ===");
-
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderIncludeNested_" + Guid.NewGuid().ToString("N"));
+        
         // ---------- Seed ----------
         using (var seedScope = rootProvider.CreateScope())
         {
@@ -38,30 +39,45 @@ public static class EfProviderIncludeNestedSmokeTest
                 c111, c112, c121, c211
             );
 
-            // Optional seed for a 3rd-level nav:
-            // If you add CommentAuthor/Author navigation later, seed it here.
-
             ctx.SaveChanges();
         }
 
+        // ---------- Query ----------
         using (var scope = rootProvider.CreateScope())
         {
             var ctx = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-            // A) baseline: no include => navs should be null (clone behavior)
+            // A) baseline: no include
             var noInclude = ctx.Set<Blog>()
                 .OrderBy(b => b.Id)
                 .ToList();
 
-            if (noInclude.Count != 2) throw new Exception($"[NoInclude] expected 2 but got {noInclude.Count}");
+            if (noInclude.Count != 2)
+                throw new Exception($"[NoInclude] expected 2 but got {noInclude.Count}");
 
             foreach (var b in noInclude)
             {
-                if (b.Detail != null) throw new Exception($"[NoInclude] expected Blog {b.Id}.Detail == null");
-                if (b.Posts != null) throw new Exception($"[NoInclude] expected Blog {b.Id}.Posts == null");
+                // reference nav: should not be loaded and should remain null
+                var detailRef = ctx.Entry(b).Reference(x => x.Detail);
+                if (detailRef.IsLoaded)
+                    throw new Exception($"[NoInclude] expected Blog {b.Id}.Detail IsLoaded == false");
+                if (b.Detail != null)
+                    throw new Exception($"[NoInclude] expected Blog {b.Id}.Detail == null");
+
+                // collection nav: should not be loaded; collection exists (non-null) but must be empty
+                var postsCol = ctx.Entry(b).Collection(x => x.Posts);
+                if (postsCol.IsLoaded)
+                    throw new Exception($"[NoInclude] expected Blog {b.Id}.Posts IsLoaded == false");
+
+                // 你的实体 Posts 默认 new List<>，所以这里应该永远不为 null
+                if (b.Posts == null)
+                    throw new Exception($"[NoInclude] Blog {b.Id}.Posts should not be null (entity initializes it)");
+
+                if (b.Posts.Count != 0)
+                    throw new Exception($"[NoInclude] expected Blog {b.Id}.Posts empty but got {b.Posts.Count}");
             }
 
-            Console.WriteLine("[NoInclude] OK: Detail/Posts are null");
+            Console.WriteLine("[NoInclude] OK: Detail not loaded (null), Posts not loaded (empty list)");
 
             // B) Multiple + Nested:
             // Include Detail (reference) + Include Posts (collection) + ThenInclude Comments (collection)
@@ -72,73 +88,56 @@ public static class EfProviderIncludeNestedSmokeTest
                 .OrderBy(b => b.Id)
                 .ToList();
 
-            AssertBlogsDetailPostsComments(withNested);
-
-            // C) Two sibling ThenInclude on same collection (requires a second nav under BlogPost)
-            //
-            // If you DON'T have a second navigation (e.g. Tags), keep this block disabled.
-            // Once you add BlogPost.Tags, enable it and fill the asserts.
-            //
-            // var withSiblingThenIncludes = ctx.Set<Blog>()
-            //     .Include(b => b.Posts)
-            //         .ThenInclude(p => p.Comments)
-            //     .Include(b => b.Posts)
-            //         .ThenInclude(p => p.Tags) // <- you need to add this navigation
-            //     .OrderBy(b => b.Id)
-            //     .ToList();
-            //
-            // AssertBlogsPostsCommentsAndTags(withSiblingThenIncludes);
-
-            // D) Deep ThenInclude (2-level ThenInclude): Posts -> Comments -> (3rd level)
-            //
-            // This requires PostComment has another navigation (e.g. Author).
-            // If you add it, enable this block and seed accordingly.
-            //
-            // var withDeepThenInclude = ctx.Set<Blog>()
-            //     .Include(b => b.Posts)
-            //         .ThenInclude(p => p.Comments)
-            //             .ThenInclude(c => c.Author) // <- you need to add this navigation
-            //     .OrderBy(b => b.Id)
-            //     .ToList();
-            //
-            // AssertBlogsPostsCommentsAuthors(withDeepThenInclude);
+            AssertBlogsDetailPostsComments(ctx, withNested);
 
             Console.WriteLine("=== INCLUDE (NESTED + MULTIPLE) TEST PASSED ===");
         }
     }
 
-    private static void AssertBlogsDetailPostsComments(List<Blog> blogs)
+    private static void AssertBlogsDetailPostsComments(AppDbContext ctx, List<Blog> blogs)
     {
-        if (blogs.Count != 2) throw new Exception($"[Include] expected 2 but got {blogs.Count}");
+        if (blogs.Count != 2)
+            throw new Exception($"[Include] expected 2 but got {blogs.Count}");
 
         foreach (var blog in blogs)
         {
-            // reference include
+            // reference include: loaded + non-null
+            var detailRef = ctx.Entry(blog).Reference(x => x.Detail);
+            if (!detailRef.IsLoaded)
+                throw new Exception($"[Include] FAILED: Blog {blog.Id}.Detail IsLoaded == false");
             if (blog.Detail == null)
                 throw new Exception($"[Include] FAILED: Blog {blog.Id}.Detail is null");
+
+            // fixup: Detail.Blog should point back
             if (blog.Detail.Blog == null || !ReferenceEquals(blog, blog.Detail.Blog))
                 throw new Exception($"[Include] FAILED: Blog {blog.Id}.Detail.Blog fix-up missing/wrong");
 
-            // collection include
+            // collection include: loaded + counts
+            var postsCol = ctx.Entry(blog).Collection(x => x.Posts);
+            if (!postsCol.IsLoaded)
+                throw new Exception($"[Include] FAILED: Blog {blog.Id}.Posts IsLoaded == false");
             if (blog.Posts == null)
-                throw new Exception($"[Include] FAILED: Blog {blog.Id}.Posts is null");
+                throw new Exception($"[Include] FAILED: Blog {blog.Id}.Posts is null (entity initializes it)");
 
-            if (blog.Id == 1 && blog.Posts.Count != 2)
-                throw new Exception($"[Include] FAILED: Blog 1 expected 2 posts but got {blog.Posts.Count}");
-            if (blog.Id == 2 && blog.Posts.Count != 1)
-                throw new Exception($"[Include] FAILED: Blog 2 expected 1 post but got {blog.Posts.Count}");
+            var expectedPosts = blog.Name == "Blog-1" ? 2 : 1;
+            if (blog.Posts.Count != expectedPosts)
+                throw new Exception($"[Include] FAILED: Blog {blog.Id} expected {expectedPosts} posts but got {blog.Posts.Count}");
 
             foreach (var post in blog.Posts)
             {
-                // inverse for posts
+                // inverse fixup for posts
                 if (post.Blog == null || !ReferenceEquals(blog, post.Blog))
                     throw new Exception($"[Include] FAILED: Post {post.Id}.Blog fix-up missing/wrong");
 
-                // nested collection include
-                if (post.Comments == null)
-                    throw new Exception($"[ThenInclude] FAILED: Post {post.Id}.Comments is null");
+                // nested collection include: Comments should be loaded
+                var commentsCol = ctx.Entry(post).Collection(x => x.Comments);
+                if (!commentsCol.IsLoaded)
+                    throw new Exception($"[ThenInclude] FAILED: Post {post.Id}.Comments IsLoaded == false");
 
-                // inverse for comments
+                if (post.Comments == null)
+                    throw new Exception($"[ThenInclude] FAILED: Post {post.Id}.Comments is null (entity initializes it)");
+
+                // verify inverse fixup for comments
                 foreach (var c in post.Comments)
                 {
                     if (c.Post == null || !ReferenceEquals(post, c.Post))
@@ -149,10 +148,4 @@ public static class EfProviderIncludeNestedSmokeTest
             Console.WriteLine($"[Include] OK: Blog {blog.Id} Detail+Posts+Comments loaded");
         }
     }
-
-    // Enable once you have BlogPost.Tags (or any 2nd nav) and seed them.
-    // private static void AssertBlogsPostsCommentsAndTags(List<Blog> blogs) { ... }
-
-    // Enable once you have PostComment.Author (or any 3rd-level nav) and seed them.
-    // private static void AssertBlogsPostsCommentsAuthors(List<Blog> blogs) { ... }
 }

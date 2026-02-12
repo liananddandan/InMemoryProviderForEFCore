@@ -18,11 +18,12 @@ public sealed class EfProviderSmokeTest
         _opt = opt ?? new EfProviderSmokeTestOptions();
     }
 
-    public void Run(IServiceProvider root)
+    public void Run()
     {
         Console.WriteLine("=== CustomMemory Provider Smoke Test ===");
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderSmoke_" + Guid.NewGuid().ToString("N"));
 
-        using (var scope = root.CreateScope())
+        using (var scope = rootProvider.CreateScope())
         {
             var ctx = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
@@ -37,7 +38,7 @@ public sealed class EfProviderSmokeTest
         if (_opt.CrudDetached)
         {
             // detached 测试必须用两个不同的 DbContext（两个 scope）
-            TestCrudDetached(root);
+            TestCrudDetached(rootProvider);
         }
 
         Console.WriteLine("=== Done ===");

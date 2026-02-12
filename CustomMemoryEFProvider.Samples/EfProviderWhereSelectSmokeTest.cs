@@ -13,9 +13,10 @@ public static class EfProviderWhereSelectSmokeTest
         public string? Name { get; set; }
     }
 
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run()
     {
         Console.WriteLine("=== WHERE + SELECT + TOLIST SMOKE TEST ===");
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderWhereSelect_" + Guid.NewGuid().ToString("N"));
 
         using var scope = rootProvider.CreateScope();
         var ctx = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -108,6 +109,6 @@ public static class EfProviderWhereSelectSmokeTest
 
         Console.WriteLine("[SelectMany] OK: flatten + resultSelector works");
         
-        Console.WriteLine("=== END ===");
+        Console.WriteLine("===✅✅✅✅✅✅ END ===");
     }
 }

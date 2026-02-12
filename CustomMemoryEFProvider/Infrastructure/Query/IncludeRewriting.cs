@@ -12,10 +12,13 @@ internal static class IncludeRewriting
     public static LambdaExpression RewriteIncludeSelector(
         LambdaExpression selector,
         ParameterExpression queryContextParam,
-        Func<Expression, Expression> rewriteSubquery // 你已有的 rewriter 链：QueryParameter + EntityRoot + EF.Property
+        Func<Expression, Expression> rewriteSubqueryToEnumerable // 只做 rewrite，不做 compile
     )
     {
-        var v = new IncludeSelectorRewriter(queryContextParam, rewriteSubquery);
+        // ✅把外层 selector 的第一个参数（通常是 TransparentIdentifier 或实体）传进去
+        var outerParam = selector.Parameters[0];
+
+        var v = new IncludeSelectorRewriter(queryContextParam, outerParam, rewriteSubqueryToEnumerable);
         var newBody = v.Visit(selector.Body)!;
         return Expression.Lambda(selector.Type, newBody, selector.Parameters);
     }
@@ -23,87 +26,129 @@ internal static class IncludeRewriting
     private sealed class IncludeSelectorRewriter : ExpressionVisitor
     {
         private readonly ParameterExpression _qc;
-        private readonly Func<Expression, Expression> _rewriteSubquery;
+        private readonly ParameterExpression _outer; // ✅ selector.Parameters[0]
+        private readonly Func<Expression, Expression> _rewriteSubqueryToEnumerable;
 
-        public IncludeSelectorRewriter(ParameterExpression qc, Func<Expression, Expression> rewriteSubquery)
+        public IncludeSelectorRewriter(
+            ParameterExpression qc,
+            ParameterExpression outer,
+            Func<Expression, Expression> rewriteSubqueryToEnumerable)
         {
             _qc = qc;
-            _rewriteSubquery = rewriteSubquery;
+            _outer = outer;
+            _rewriteSubqueryToEnumerable = rewriteSubqueryToEnumerable;
         }
 
         protected override Expression VisitExtension(Expression node)
         {
-            if (node is IncludeExpression ie)
+            if (node is not IncludeExpression ie)
+                return base.VisitExtension(node);
+
+            // collection include：NavigationExpression = MaterializeCollectionNavigationExpression
+            if (ie.NavigationExpression is MaterializeCollectionNavigationExpression mc)
             {
-                // 只处理 collection include：NavigationExpression = MaterializeCollectionNavigationExpression
-                if (ie.NavigationExpression is MaterializeCollectionNavigationExpression mc)
-                {
-                    // mc.Subquery 是一个 IQueryable<TElement> 形状（通常是 correlated）
-                    var subquery = _rewriteSubquery(mc.Subquery);
+                // 1) rewrite subquery（把 ShapedQuery / CustomMemoryQuery 编译成“可执行表达式”）
+                var subqueryExpr = _rewriteSubqueryToEnumerable(mc.Subquery);
 
-                    // 调用 helper：LoadCollection<TEntity, TElement>(qc, entity, navigation, subquery, setLoaded)
-                    var entityExpr = Visit(ie.EntityExpression)!; // b
-                    var elementType = GetIQueryableElementType(subquery.Type)
-                                      ?? throw new InvalidOperationException($"Include subquery is not IQueryable<T>. Type={subquery.Type}");
+                var elementType = GetSequenceElementType(subqueryExpr.Type)
+                                  ?? throw new InvalidOperationException(
+                                      $"Include subquery is not a sequence. Type={subqueryExpr.Type}");
 
-                    var method = typeof(IncludeRewriting)
-                        .GetMethod(nameof(LoadCollection), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-                        .MakeGenericMethod(entityExpr.Type, elementType);
+                // 2) 统一成 IEnumerable<TElement>
+                var ienum = typeof(IEnumerable<>).MakeGenericType(elementType);
+                if (!ienum.IsAssignableFrom(subqueryExpr.Type))
+                    throw new InvalidOperationException(
+                        $"Include subquery must be IEnumerable<T>. Got {subqueryExpr.Type}");
 
-                    return Expression.Call(
-                        method,
-                        _qc,
-                        entityExpr,
-                        Expression.Constant(ie.Navigation, typeof(INavigationBase)),
-                        subquery,
-                        Expression.Constant(ie.SetLoaded));
-                }
+                if (subqueryExpr.Type != ienum)
+                    subqueryExpr = Expression.Convert(subqueryExpr, ienum);
 
-                // reference include：你先别做“装填”，至少别崩。最小语义：只返回 entity（让 reference 仍按你 join pipeline 工作）
-                return Visit(ie.EntityExpression)!;
+                // 3) ✅关键：编译成 Func<QueryContext, TOuter, IEnumerable<TElement>>
+                var delType = typeof(Func<,,>).MakeGenericType(typeof(QueryContext), _outer.Type, ienum);
+                var lam = Expression.Lambda(delType, subqueryExpr, _qc, _outer);
+                var compiled = lam.Compile();
+
+                // 4) RunCompiledSubquery(qc, outer, compiled) -> IEnumerable<TElement>
+                var runOpen = typeof(IncludeRewriting).GetMethod(
+                    nameof(RunCompiledSubqueryWithOuter),
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+                var runClosed = runOpen.MakeGenericMethod(_outer.Type, elementType);
+
+                var subqueryEnumerable = Expression.Call(
+                    runClosed,
+                    _qc,
+                    _outer,
+                    Expression.Constant(compiled, delType));
+
+                // 5) 调用 LoadCollection<TEntity,TElement>(qc, entity, nav, subqueryEnumerable, setLoaded)
+                var entityExpr = Visit(ie.EntityExpression)!; // 例如 b.Outer（Blog）
+                var loadOpen = typeof(IncludeRewriting).GetMethod(
+                    nameof(LoadCollection),
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+                var loadClosed = loadOpen.MakeGenericMethod(entityExpr.Type, elementType);
+
+                return Expression.Call(
+                    loadClosed,
+                    _qc,
+                    entityExpr,
+                    Expression.Constant(ie.Navigation, typeof(INavigationBase)),
+                    subqueryEnumerable, // IEnumerable<TElement>
+                    Expression.Constant(ie.SetLoaded));
             }
 
-            return base.VisitExtension(node);
-        }
-
-        private static Type? GetIQueryableElementType(Type t)
-        {
-            if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(IQueryable<>))
-                return t.GetGenericArguments()[0];
-
-            var iface = t.GetInterfaces()
-                .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IQueryable<>));
-
-            return iface?.GetGenericArguments()[0];
+            // reference include：先不做主动装填，最小语义：继续返回 entityExpression，让你 join pipeline 处理
+            return Visit(ie.EntityExpression)!;
         }
     }
 
-    // 关键：这里放 IsLoaded guard，防止重复加载 / 追加两次
+    private static IEnumerable<TElement> RunCompiledSubqueryWithOuter<TOuter, TElement>(
+        QueryContext qc,
+        TOuter outer,
+        Func<QueryContext, TOuter, IEnumerable<TElement>> compiled)
+        where TElement : class
+        => compiled(qc, outer);
+
+    private static Type? GetSequenceElementType(Type t)
+    {
+        if (t.IsGenericType)
+        {
+            var def = t.GetGenericTypeDefinition();
+            if (def == typeof(IQueryable<>) || def == typeof(IEnumerable<>))
+                return t.GetGenericArguments()[0];
+        }
+
+        var iface = t.GetInterfaces()
+            .FirstOrDefault(i => i.IsGenericType &&
+                                 (i.GetGenericTypeDefinition() == typeof(IQueryable<>)
+                                  || i.GetGenericTypeDefinition() == typeof(IEnumerable<>)));
+
+        return iface?.GetGenericArguments()[0];
+    }
+
     private static TEntity LoadCollection<TEntity, TElement>(
         QueryContext qc,
         TEntity entity,
         INavigationBase navBase,
-        IQueryable<TElement> subquery,
+        IEnumerable<TElement> subqueryEnumerable,
         bool setLoaded)
         where TEntity : class
+        where TElement : class
     {
         if (entity == null) return entity;
 
         var entry = qc.Context.Entry(entity);
 
-        // collection nav
         var navName = navBase.Name;
         var collection = entry.Collection(navName);
 
-        // guard：避免重复装填（对“两个 include”/“重复 include”很关键）
         if (collection.IsLoaded)
             return entity;
 
-        // 执行 subquery（你现在是 N+1 模式，先保证语义正确即可）
-        var list = subquery.ToList();
+        // ✅这里枚举的是 IEnumerable<T>，但它来自“已编译的 delegate”，不会再触发 ReduceExtensions
+        var list = subqueryEnumerable.ToList();
 
-        // 把结果写回到 entity 的集合属性
-        // 这里不假设具体集合类型，只要它实现 ICollection<TElement>
         var current = GetOrCreateCollection<TEntity, TElement>(entity, navBase);
         current.Clear();
         foreach (var x in list) current.Add(x);
@@ -114,19 +159,21 @@ internal static class IncludeRewriting
         return entity;
     }
 
-    private static ICollection<TElement> GetOrCreateCollection<TEntity, TElement>(TEntity entity, INavigationBase navBase)
+    private static ICollection<TElement> GetOrCreateCollection<TEntity, TElement>(
+        TEntity entity,
+        INavigationBase navBase)
         where TEntity : class
+        where TElement : class
     {
-        // navBase 可能是 INavigation（collection）
         var pi = entity.GetType().GetProperty(navBase.Name)
-                 ?? throw new InvalidOperationException($"Cannot find navigation property '{navBase.Name}' on '{entity.GetType()}'.");
+                 ?? throw new InvalidOperationException(
+                     $"Cannot find navigation property '{navBase.Name}' on '{entity.GetType()}'.");
 
         var val = pi.GetValue(entity);
 
         if (val is ICollection<TElement> ok)
             return ok;
 
-        // 如果是 null，尝试 new List<TElement>() 赋回去
         if (val == null)
         {
             var created = new List<TElement>();

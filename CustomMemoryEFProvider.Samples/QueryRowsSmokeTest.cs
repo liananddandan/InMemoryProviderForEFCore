@@ -8,9 +8,10 @@ namespace CustomEFCoreProvider.Samples;
 
 public static class QueryRowsSmokeTest
 {
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run()
     {
         Console.WriteLine("=== QUERYROWS SMOKE TEST (ROOT QUERY ONLY) ===");
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderQueryRows_" + Guid.NewGuid().ToString("N"));
 
         ProviderDiagnostics.Reset();
 

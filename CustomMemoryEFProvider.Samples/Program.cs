@@ -18,28 +18,28 @@ try
 
     using var sp = services.BuildServiceProvider();
 
-    // var tester = new EfProviderSmokeTest(new EfProviderSmokeTestOptions
-    //  {
-    //      CheckModel = true,
-    //      CheckInternalServices = true,
-    //      CheckValueGenerator = true,
-    //
-    //      CrudSingle = true,
-    //      CrudMultiple = true,
-    //      CrudDetached = true
-    //  });
+    var tester = new EfProviderSmokeTest(new EfProviderSmokeTestOptions
+     {
+         CheckModel = true,
+         CheckInternalServices = true,
+         CheckValueGenerator = true,
     
-    // tester.Run(sp);
-    // EfProviderFinderSmokeTest.Run(sp);
-    // EfProviderImmediateExecutionSmokeTest.Run(sp);
-    // EfProviderWhereSelectSmokeTest.Run(sp);
-    // EfProviderOrderBySmokeTest.Run(sp);
-    // EfProviderSkipTakeSmokeTest.Run(sp);
-    // EfProviderIncludeReferenceSmokeTest.Run(sp);
+         CrudSingle = true,
+         CrudMultiple = true,
+         CrudDetached = true
+     });
+    
+    tester.Run();
+    EfProviderFinderSmokeTest.Run();
+    EfProviderImmediateExecutionSmokeTest.Run();
+    EfProviderWhereSelectSmokeTest.Run();
+    EfProviderOrderBySmokeTest.Run();
+    EfProviderSkipTakeSmokeTest.Run();
+    EfProviderIncludeReferenceSmokeTest.Run();
     EfProviderIncludeCollectionSmokeTest.Run();
-    // EfProviderIncludeNestedSmokeTest.Run(sp);
-    // IdentityResolutionProblemSmokeTest.Run(sp);
-    // QueryRowsSmokeTest.Run(sp);
+    EfProviderIncludeNestedSmokeTest.Run();
+    IdentityResolutionProblemSmokeTest.Run();
+    QueryRowsSmokeTest.Run();
 }
 catch (Exception e)
 {

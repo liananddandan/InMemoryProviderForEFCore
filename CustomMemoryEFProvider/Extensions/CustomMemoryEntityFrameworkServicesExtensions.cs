@@ -59,7 +59,6 @@ public static class CustomMemoryEntityFrameworkServicesExtensions
             var cfg = sp.GetRequiredService<CustomMemoryDbConfig>();
             var root = sp.GetRequiredService<MemoryDatabaseRoot>();
             var db = root.GetOrAdd(cfg.DatabaseName);
-            Console.WriteLine($"[IMemoryDatabase] scope={sp.GetHashCode()} root={root.GetHashCode()} db={db.GetHashCode()} name={cfg.DatabaseName}");
 
             if (cfg.ClearOnCreate)
             {

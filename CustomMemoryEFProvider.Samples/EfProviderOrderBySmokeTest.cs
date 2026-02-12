@@ -6,9 +6,10 @@ namespace CustomEFCoreProvider.Samples;
 
 public static class EfProviderOrderBySmokeTest
 {
-    public static void Run(IServiceProvider rootProvider)
+    public static void Run()
     {
         Console.WriteLine("=== ORDERBY SMOKE TEST ===");
+        using var rootProvider = TestHost.BuildRootProvider(dbName: "ProviderWhereSelect_" + Guid.NewGuid().ToString("N"));
 
         using (var seedScope = rootProvider.CreateScope())
         {
@@ -60,6 +61,6 @@ public static class EfProviderOrderBySmokeTest
                 Console.WriteLine($"  - id={e.Id} name={e.Name}");
         }
 
-        Console.WriteLine("=== END ===");
+        Console.WriteLine("===✅✅✅✅✅✅ END ===");
     }
 }
