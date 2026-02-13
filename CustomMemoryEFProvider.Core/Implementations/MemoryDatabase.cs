@@ -66,32 +66,25 @@ public class MemoryDatabase : IMemoryDatabase
 
     internal void CommitTransaction()
     {
-        if (_currentTransaction != null && _currentTransaction.State != TransactionState.Active)
-        {
+        if (_currentTransaction == null || _currentTransaction.State != TransactionState.Active)
             throw new TransactionException("No active transaction to commit");
-        }
 
         if (_transactionTables == null) return;
 
         foreach (var (tableType, tableObj) in _transactionTables)
         {
-            if (tableObj is IMemoryTable transactionalTable)
-            {
-                var baseTableObj = _tables.GetOrAdd(
-                    tableType,
-                    type => Activator.CreateInstance(typeof(MemoryTable<>).MakeGenericType(type), type)!);
+            if (tableObj is not IMemoryTable txTable) continue;
 
-                if (baseTableObj is not IMemoryTable baseTable) continue;
+            // 确保事务表 pending 已合并（你想要“提交事务”时一并提交 pending）
+            txTable.SaveChanges();
 
-                baseTable.Clear();
-                foreach (var entity in transactionalTable.GetAllEntities())
-                {
-                    var addMethod = baseTable.GetType().GetMethod("Add");
-                    addMethod.Invoke(baseTable, new[] { entity });
-                }
+            var baseTableObj = _tables.GetOrAdd(tableType, CreateTableInstance);
+            if (baseTableObj is not IMemoryTable baseTable) continue;
 
-                baseTable.SaveChanges(); // 提交到基础表
-            }
+            baseTable.Clear();
+            baseTable.ImportCommittedRows(txTable.ExportCommittedRows());
+            // commit 后基础表不应该带 pending
+            // baseTable.ImportPendingRows(Array.Empty<PendingChangeRow>()); // 可选：你也可以在 Clear() 里就清掉 pending
         }
 
         _transactionTables = null;
@@ -198,18 +191,13 @@ public class MemoryDatabase : IMemoryDatabase
     
     private object CreateTransactionalClone(Type clrType, IMemoryTable baseTable)
     {
-        var txObj = Activator.CreateInstance(typeof(MemoryTable<>).MakeGenericType(clrType), clrType)!;
+        var txObj = (IMemoryTable)Activator.CreateInstance(
+            typeof(MemoryTable<>).MakeGenericType(clrType), clrType)!;
 
-        // 把 baseTable 的数据复制到 txTable
-        foreach (var entity in baseTable.GetAllEntities())
-        {
-            var clone = ObjectCloner.DeepClone(entity);
-            // 这里为了不改 IMemoryTable 接口，仍然用一次反射调用 Add
-            var add = txObj.GetType().GetMethod("Add")!;
-            add.Invoke(txObj, new[] { clone });
-        }
+        // 复制 committed + pending（完整状态快照）
+        txObj.ImportCommittedRows(baseTable.ExportCommittedRows());
+        txObj.ImportPendingRows(baseTable.ExportPendingRows());
 
-        ((IMemoryTable)txObj).SaveChanges();
         return txObj;
     }
 

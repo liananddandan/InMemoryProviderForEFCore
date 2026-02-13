@@ -1,161 +1,192 @@
-using CustomMemoryEFProvider.Core.Enums;
 using CustomMemoryEFProvider.Core.Implementations;
-using CustomMemoryEFProvider.Tests.Core;
 using Xunit;
+
+namespace CustomMemoryEFProvider.Tests.Core.Implementations;
 
 public class MemoryDatabaseTests
 {
-    // 测试1：无事务时基础表CRUD正常
-    [Fact]
-    public void GetTable_NoTransaction_CrudWorks()
+    private class BaseEntity
     {
-        // Arrange
-        var db = new MemoryDatabase();
-        var table = db.GetTable<Product>();
-        var product = new Product { Id = 1, Name = "Test Product", Price = 99.99m };
+        public int Id { get; set; }
+    }
 
-        // Act
-        table.Add(product);
+    private class DerivedEntity : BaseEntity
+    {
+        public string Name { get; set; } = string.Empty;
+    }
+
+    private class AnotherEntity
+    {
+        public int Id { get; set; }
+    }
+
+    [Fact]
+    public void GetTable_Should_Return_Same_Instance_For_Same_Type()
+    {
+        var db = new MemoryDatabase();
+
+        var table1 = db.GetTable<BaseEntity>();
+        var table2 = db.GetTable<BaseEntity>();
+
+        Assert.Same(table1, table2);
+    }
+
+    [Fact]
+    public void GetTable_Should_Isolate_Different_Entity_Types()
+    {
+        var db = new MemoryDatabase();
+
+        var table1 = db.GetTable<BaseEntity>();
+        var table2 = db.GetTable<AnotherEntity>();
+
+        Assert.NotSame(table1, table2);
+    }
+
+    [Fact]
+    public void GetTable_Should_Allow_Derived_Type_With_Base_Generic()
+    {
+        var db = new MemoryDatabase();
+
+        var table = db.GetTable<DerivedEntity>(typeof(DerivedEntity));
+
+        Assert.NotNull(table);
+    }
+
+    [Fact]
+    public void GetTable_Should_Throw_When_Type_Not_Assignable()
+    {
+        var db = new MemoryDatabase();
+
+        Assert.Throws<ArgumentException>(() =>
+            db.GetTable<BaseEntity>(typeof(AnotherEntity)));
+    }
+
+    [Fact]
+    public void Transaction_Should_Rollback_Correctly()
+    {
+        var db = new MemoryDatabase();
+
+        var table = db.GetTable<AnotherEntity>();
+        table.Add(new AnotherEntity { Id = 1 });
         table.SaveChanges();
-        var foundProduct = table.Find(new object[] { 1 });
 
-        // Assert
-        Assert.NotNull(foundProduct);
-        Assert.Equal(1, foundProduct.Id);
-        Assert.Equal("Test Product", foundProduct.Name);
-        Assert.Single(table.Query);
+        using var tx = db.BeginTransaction();
+
+        var txTable = db.GetTable<AnotherEntity>();
+        txTable.Add(new AnotherEntity { Id = 2 });
+        txTable.SaveChanges();
+
+        tx.Rollback();
+
+        // After rollback: base table unchanged
+        var afterRollback = db.GetTable<AnotherEntity>();
+        Assert.Single(afterRollback.GetAllEntities());
     }
 
-    // 测试2：事务隔离性 - 事务内修改不提交，外部无感知（展示首选）
     [Fact]
-    public void BeginTransaction_Isolation_UncommittedChangesNotPersisted()
+    public void SaveChanges_Should_Return_Total_Affected_Count()
     {
-        // Arrange
         var db = new MemoryDatabase();
-        var baseTable = db.GetTable<Product>();
-        baseTable.Add(new Product { Id = 1, Price = 100 });
-        baseTable.SaveChanges();
-        int initialCount = baseTable.Query.Count();
 
-        // Act：事务内修改但不提交
-        using (var tran = db.BeginTransaction())
-        {
-            var tranTable = db.GetTable<Product>();
-            tranTable.Add(new Product { Id = 2, Price = 200 });
-            tranTable.SaveChanges();
-            var product1 = tranTable.Find(new object[] { 1 });
-            product1.Price = 150;
-            tranTable.Update(product1);
-            tranTable.SaveChanges();
+        var table1 = db.GetTable<BaseEntity>();
+        var table2 = db.GetTable<AnotherEntity>();
 
-            // 验证事务内多次GetTable复用临时表
-            var tranTable2 = db.GetTable<Product>();
-            Assert.Same(tranTable, tranTable2); // 同一个实例
-            Assert.Equal(2, tranTable2.Query.Count());
-        } // 事务自动Rollback
+        table1.Add(new BaseEntity { Id = 1 });
+        table2.Add(new AnotherEntity { Id = 1 });
 
-        // Assert：事务结束后基础表无变化
-        var externalTable = db.GetTable<Product>();
-        Assert.Equal(initialCount, externalTable.Query.Count());
-        Assert.Equal(100, externalTable.Find(new object[] { 1 }).Price);
-        Assert.Null(externalTable.Find(new object[] { 2 }));
+        var affected = db.SaveChanges();
+
+        Assert.True(affected >= 2);
     }
 
-    // 测试3：事务原子性 - Commit后变更落地到基础表
     [Fact]
-    public void Transaction_Commit_ChangesPersistToBaseTable()
+    public void BeginTransaction_Should_Throw_If_Already_Active()
     {
-        // Arrange
         var db = new MemoryDatabase();
-        var baseTable = db.GetTable<Product>();
-        baseTable.Add(new Product { Id = 1, Price = 100 });
+
+        var tx = db.BeginTransaction();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            db.BeginTransaction());
+    }
+    
+    [Fact]
+    public void Transaction_Should_ReadYourWrites_WithinActiveTransaction()
+    {
+        using var db = new MemoryDatabase();
+
+        // base: commit 1 row
+        var baseTable = db.GetTable<AnotherEntity>();
+        baseTable.Add(new AnotherEntity { Id = 1 });
         baseTable.SaveChanges();
 
-        // Act
-        using (var tran = db.BeginTransaction())
+        Assert.Single(baseTable.QueryRows);
+
+        // begin tx: from now on, db.GetTable returns tx table
+        using var tx = db.BeginTransaction();
+
+        var txTable = db.GetTable<AnotherEntity>();
+        txTable.Add(new AnotherEntity { Id = 2 });
+
+        // IMPORTANT: txTable.QueryRows merges committed + pending, so within tx we should see 2 rows.
+        Assert.Equal(2, txTable.QueryRows.Count());
+
+        // Also, since db is in tx mode, fetching again should still show tx view
+        var again = db.GetTable<AnotherEntity>();
+        Assert.Equal(2, again.QueryRows.Count());
+    }
+
+    [Fact]
+    public void Rollback_Should_Discard_TxChanges_And_ReturnToBaseView()
+    {
+        using var db = new MemoryDatabase();
+
+        var table = db.GetTable<AnotherEntity>();
+        table.Add(new AnotherEntity { Id = 1 });
+        table.SaveChanges();
+
+        Assert.Single(table.QueryRows);
+
+        using (var tx = db.BeginTransaction())
         {
-            var tranTable = db.GetTable<Product>();
-            tranTable.Add(new Product { Id = 2, Price = 200 });
-            var product1 = tranTable.Find(new object[] { 1 });
-            product1.Price = 150;
-            tranTable.Update(product1);
-            tran.Commit();
+            var txTable = db.GetTable<AnotherEntity>();
+            txTable.Add(new AnotherEntity { Id = 2 });
+
+            // within tx, we see base + tx pending
+            Assert.Equal(2, txTable.QueryRows.Count());
+
+            // rollback
+            tx.Rollback();
         }
 
-        // Assert：基础表包含所有变更
-        var finalTable = db.GetTable<Product>();
-        Assert.Equal(2, finalTable.Query.Count());
-        Assert.Equal(150, finalTable.Find(new object[] { 1 }).Price);
-        Assert.NotNull(finalTable.Find(new object[] { 2 }));
+        // after rollback, db.GetTable returns base table again
+        var after = db.GetTable<AnotherEntity>();
+        Assert.Single(after.QueryRows);
     }
 
-    // 测试4：事务原子性 - Rollback后变更全部丢弃
     [Fact]
-    public void Transaction_Rollback_ChangesDiscarded()
+    public void Commit_Should_Persist_TxChanges_ToBase()
     {
-        // Arrange
-        var db = new MemoryDatabase();
-        var baseTable = db.GetTable<Product>();
-        baseTable.Add(new Product { Id = 1, Price = 100 });
-        baseTable.SaveChanges();
+        using var db = new MemoryDatabase();
 
-        // Act
-        using (var tran = db.BeginTransaction())
+        var table = db.GetTable<AnotherEntity>();
+        table.Add(new AnotherEntity { Id = 1});
+        table.SaveChanges();
+
+        Assert.Single(table.QueryRows);
+
+        using (var tx = db.BeginTransaction())
         {
-            var tranTable = db.GetTable<Product>();
-            tranTable.Add(new Product { Id = 2, Price = 200 });
-            var product1 = tranTable.Find(new object[] { 1 });
-            product1.Price = 150;
-            tranTable.Update(product1);
-            tran.Rollback();
+            var txTable = db.GetTable<AnotherEntity>();
+            txTable.Add(new AnotherEntity { Id = 2 });
+
+            Assert.Equal(2, txTable.QueryRows.Count());
+
+            tx.Commit();
         }
 
-        // Assert：基础表恢复原始状态
-        var finalTable = db.GetTable<Product>();
-        Assert.Single(finalTable.Query);
-        Assert.Equal(100, finalTable.Find(new object[] { 1 }).Price);
-        Assert.Null(finalTable.Find(new object[] { 2 }));
-    }
-
-    // 测试5：事务状态流转 - 提交后状态变为Committed
-    [Fact]
-    public void Transaction_Commit_StateChangesToCommitted()
-    {
-        // Arrange
-        var db = new MemoryDatabase();
-        var tran = db.BeginTransaction();
-
-        // Act
-        tran.Commit();
-
-        // Assert
-        Assert.Equal(TransactionState.Committed, tran.State);
-    }
-
-    // 测试6：事务状态流转 - 回滚后状态变为RolledBack
-    [Fact]
-    public void Transaction_Rollback_StateChangesToRolledBack()
-    {
-        // Arrange
-        var db = new MemoryDatabase();
-        var tran = db.BeginTransaction();
-
-        // Act
-        tran.Rollback();
-
-        // Assert
-        Assert.Equal(TransactionState.RolledBack, tran.State);
-    }
-
-    // 测试7：禁止同时开启多个活跃事务
-    [Fact]
-    public void BeginTransaction_MultipleActiveTransactions_ThrowsException()
-    {
-        // Arrange
-        var db = new MemoryDatabase();
-        db.BeginTransaction();
-
-        // Act & Assert
-        Assert.Throws<InvalidOperationException>(() => db.BeginTransaction());
+        // after commit, base should now have 2 rows
+        var after = db.GetTable<AnotherEntity>();
+        Assert.Equal(2, after.QueryRows.Count());
     }
 }

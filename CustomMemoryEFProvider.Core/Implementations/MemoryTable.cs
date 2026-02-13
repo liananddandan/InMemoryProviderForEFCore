@@ -221,4 +221,35 @@ public class MemoryTable<TEntity> : IMemoryTable<TEntity> where TEntity : class
     }
 
     IEnumerable IMemoryTable.GetAllEntities() => QueryRows;
+  
+    public SnapshotRow[] ExportCommittedRows()
+    {
+        return _committedData.Select(kv =>
+            new SnapshotRow(kv.Key.ToArray(), kv.Value)
+        ).ToArray();
+    }
+
+    public PendingChangeRow[] ExportPendingRows()
+    {
+        return _pendingChanges.Select(kv =>
+        {
+            var keyCopy = kv.Key.ToArray();
+            var (snap, state) = kv.Value;
+            return new PendingChangeRow(keyCopy, snap, state);
+        }).ToArray();
+    }
+
+    public void ImportCommittedRows(SnapshotRow[] rows)
+    {
+        _committedData.Clear();
+        foreach (var r in rows)
+            _committedData[r.Key.ToArray()] = r.Snapshot;
+    }
+
+    public void ImportPendingRows(PendingChangeRow[] rows)
+    {
+        _pendingChanges.Clear();
+        foreach (var r in rows)
+            _pendingChanges[r.Key.ToArray()] = (r.Snapshot, r.State);
+    }
 }

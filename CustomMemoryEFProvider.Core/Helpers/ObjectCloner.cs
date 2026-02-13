@@ -33,4 +33,12 @@ public static class ObjectCloner
         // }
         // return clone;
     }
+    
+    public static object DeepClone(object source, Type runtimeType)
+    {
+        if (source == null) return null!;
+
+        var json = JsonSerializer.Serialize(source, runtimeType);
+        return JsonSerializer.Deserialize(json, runtimeType)!;
+    }
 }

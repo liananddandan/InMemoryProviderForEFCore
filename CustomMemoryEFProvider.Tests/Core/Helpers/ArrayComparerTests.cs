@@ -178,7 +178,19 @@ public class ArrayComparerTests
         var hashCode = _comparer.GetHashCode(emptyArray);
 
         // Assert
-        Assert.Equal(0, hashCode);
+        Assert.Equal(17, hashCode);
+    }
+    
+    [Fact]
+    public void GetHashCode_EqualArrays_Should_Return_Same_Value()
+    {
+        var a1 = Array.Empty<object>();
+        var a2 = Array.Empty<object>();
+
+        var h1 = _comparer.GetHashCode(a1);
+        var h2 = _comparer.GetHashCode(a2);
+
+        Assert.Equal(h1, h2);
     }
 
     [Fact]

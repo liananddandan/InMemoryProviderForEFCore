@@ -27,7 +27,6 @@ public class ArrayComparer : IEqualityComparer<object[]>, IEqualityComparer
     {
         if (obj == null) return 0;
         
-        // 合并数组所有元素的 HashCode（避免相同内容不同 Hash）
         int hash = 17;
         foreach (var item in obj)
         {

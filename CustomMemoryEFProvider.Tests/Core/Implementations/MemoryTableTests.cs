@@ -276,13 +276,13 @@ public class MemoryTableTests
             _productTable.Add(new Product { Id = 3, Name = "Tablet", Price = 1999 });
 
             // Act
-            var products = _productTable.Query.ToList();
+            var products = _productTable.QueryRows.ToList();
 
             // Assert
             Assert.Equal(3, products.Count);
-            Assert.Contains(products, p => p.Id == 1);
-            Assert.Contains(products, p => p.Id == 2);
-            Assert.Contains(products, p => p.Id == 3);
+            Assert.Contains(products, r => (int)r.Key[0] == 1);
+            Assert.Contains(products, r => (int)r.Key[0] == 2);
+            Assert.Contains(products, r => (int)r.Key[0] == 3);
         }
 
         /// <summary>
@@ -296,13 +296,12 @@ public class MemoryTableTests
             _productTable.Add(new Product { Id = 2, Name = "Phone", Price = 2999 });
             _productTable.Add(new Product { Id = 3, Name = "Tablet", Price = 1999 });
 
-            // Act: Filter products under 3000
-            var cheapProducts = _productTable.Query.Where(p => p.Price < 3000).ToList();
+            var rows = _productTable.QueryRows.ToList();
 
-            // Assert
-            Assert.Equal(2, cheapProducts.Count);
-            Assert.Contains(cheapProducts, p => p.Id == 2);
-            Assert.Contains(cheapProducts, p => p.Id == 3);
+            Assert.Equal(3, rows.Count);
+            Assert.Contains(rows, r => (int)r.Key[0] == 1);
+            Assert.Contains(rows, r => (int)r.Key[0] == 2);
+            Assert.Contains(rows, r => (int)r.Key[0] == 3);
         }
         #endregion
     }

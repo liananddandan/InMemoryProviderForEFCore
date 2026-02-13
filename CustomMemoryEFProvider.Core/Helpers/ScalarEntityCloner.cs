@@ -99,10 +99,8 @@ public static class ScalarEntityCloner
 
             if (snap.ValuesByName.TryGetValue(p.Name, out var v))
             {
-                // 可选：简单类型转换保护（避免 int? / int 等差异）
                 if (v != null && !p.PropertyType.IsInstanceOfType(v))
                 {
-                    // 只处理常见可转换场景
                     var targetType = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
                     try
                     {
@@ -110,13 +108,11 @@ public static class ScalarEntityCloner
                     }
                     catch
                     {
-                        // 不强行转，直接让 SetValue 抛出更清晰（或你也可以自己抛）
                     }
                 }
 
                 p.SetValue(obj, v);
             }
-            // 没有该字段就保持默认值
         }
 
         return obj;

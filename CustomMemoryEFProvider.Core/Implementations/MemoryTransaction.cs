@@ -30,7 +30,7 @@ public class MemoryTransaction : IMemoryTransaction
 
     public Guid TransactionId { get; } = Guid.NewGuid();
 
-    public MemoryTransaction(MemoryDatabase database)
+    internal MemoryTransaction(MemoryDatabase database)
     {
         _database = database ?? throw new ArgumentNullException(nameof(database));
         
