@@ -22,15 +22,15 @@ public static class CustomMemoryEntityFrameworkServicesExtensions
     public static IServiceCollection AddEntityFrameworkCustomMemoryDatabase(
         this IServiceCollection serviceCollection)
     {
-        // 校验入参（对齐官方 Provider 写法）
+        // Validate input (align with official provider patterns)
         ArgumentNullException.ThrowIfNull(serviceCollection, nameof(serviceCollection));
-        // NEW: register SnapshotValueBufferFactory for compiling visitor factory
+        // NEW: register SnapshotValueBufferFactory for compiling visitor factory  
         serviceCollection.TryAddSingleton<SnapshotValueBufferFactory>();
-        
-        // ========== 第一步：注册 EF Core 框架级核心服务 ==========
+
+        // Step 1: register EF Core framework-facing services (core pipeline slots)
         var builder = new EntityFrameworkServicesBuilder(serviceCollection);
-        
-        // 2) 这些是 EF “框架服务”，不要放 TryAddProviderSpecificServices 里
+
+        // These are EF Core "framework services" that must be present for a database provider
         builder.TryAdd<ITypeMappingSource, CustomMemoryTypeMappingSource>();
         builder.TryAdd<LoggingDefinitions, CustomMemoryLoggingDefinitions>();
         builder.TryAdd<IQueryableMethodTranslatingExpressionVisitorFactory,
@@ -39,20 +39,26 @@ public static class CustomMemoryEntityFrameworkServicesExtensions
             CustomMemoryShapedQueryCompilingExpressionVisitorFactory>();
         builder.TryAdd<IValueGeneratorSelector, CustomMemoryValueGeneratorSelector>();
         builder.TryAdd<IDatabaseProvider, CustomMemoryDatabaseProvider>();
-        builder.TryAdd<IDatabase, CustomMemoryEfDatabase>();                 // 你必须提供
+        // Required: provider must supply an IDatabase implementation 
+        builder.TryAdd<IDatabase, CustomMemoryEfDatabase>();
         builder.TryAdd<IQueryContextFactory, CustomMemoryQueryContextFactory>();
+
+        // Register EF Core core services (fills remaining defaults) 
         builder.TryAddCoreServices();
+
+        // Override specific EF services when default behavior is not compatible with this provider
         serviceCollection.Replace(
             ServiceDescriptor.Scoped<IEntityFinderSource, CustomMemoryEntityFinderSource>()
         );
-        // 3) 你自己的 provider 扩展服务，放 provider-specific 没问题
+
+        // Step 2: provider-specific extension services (provider-only abstractions)
         builder.TryAddProviderSpecificServices(p =>
         {
             p.TryAddScoped<IEntityFinderFactory, CustomMemoryEntityFinderFactory>();
             p.TryAddScoped<ICustomMemoryDatabaseProvider, CustomMemoryDatabaseProvider>();
         });
 
-        // 4) 你自己的业务服务
+        // Step 3: provider storage services (actual in-memory database implementation)
         serviceCollection.TryAddSingleton(new MemoryDatabaseRoot());
         serviceCollection.TryAddScoped<IMemoryDatabase>(sp =>
         {
@@ -64,10 +70,10 @@ public static class CustomMemoryEntityFrameworkServicesExtensions
             {
                 db.ClearAllTables();
             }
-            
+
             return db;
         });
         serviceCollection.TryAddScoped(typeof(IMemoryTable<>), typeof(MemoryTable<>));
-        return serviceCollection;      
+        return serviceCollection;
     }
 }
