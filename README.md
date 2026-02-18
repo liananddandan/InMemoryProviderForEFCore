@@ -1,7 +1,7 @@
 ### Project Overview
 This project builds a custom in-memory EF Core provider from scratch to explore and demonstrate the EF Core architecture. It covers core components such as service registration, query translation and compilation,  entity tracking, identity resolution, include/then-include handling, and transaction isolation.
 
-Unlike the built-in InMemory provider, this implementation explicitly models EF Core’s internal pipeline — from IDbContextOptionsExtension registration, to custom query expressions, shaped query compilation, snapshot-based storage, and navigation fix-up — in order to expose and control each stage of execution.
+Unlike the built-in InStorage Memory provider, this implementation explicitly models EF Core’s internal pipeline — from IDbContextOptionsExtension registration, to custom query expressions, shaped query compilation, snapshot-based storage, and navigation fix-up — in order to expose and control each stage of execution.
 
 The goal of the project is to showcase architectural clarity, provider extensibility knowledge, and the ability to analyze and implement complex framework internals. It is intended as both a  technical showcase and a knowledge-sharing project.
 ### Motivation
@@ -10,5 +10,6 @@ The goal of the project is to showcase architectural clarity, provider extensibi
 ### Implement Process
  #### 1. [Registration and Discovery](https://dev.to/alexleeeeeeeeee/c-learning-notes-custom-in-memory-provider1-registration-and-discovery-12i0)
  #### 2. [In-Memory Database Runtime](https://dev.to/alexleeeeeeeeee/net-learning-notes-custom-in-memory-provider2-in-memory-database-runtime-254p)
+ #### 3. [Storage Write Model and Key-Based Retrieval](https://dev.to/alexleeeeeeeeee/net-learning-notes-custom-in-memory-provider3-storage-write-model-and-key-based-retrieval-1i7m)
 ### Testing Strategy
 ### Limitations

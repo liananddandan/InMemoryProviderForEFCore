@@ -69,7 +69,6 @@ public sealed class CustomMemoryEntityFinder<TEntity> : IEntityFinder<TEntity> w
         Console.WriteLine(
             $"[FINDER] STORE HIT : {_entityType.ClrType.Name} key=[{string.Join(",", keyValues)}] -> attach");
         var internalEntry = _stateManager.GetOrCreateEntry(found, _entityType);
-        // acceptChanges: true 表示把当前值当作“已保存到数据库”的值
         internalEntry.SetEntityState(EntityState.Unchanged, acceptChanges: true);
         return found;
     }
