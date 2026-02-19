@@ -4,7 +4,18 @@ This project builds a custom in-memory EF Core provider from scratch to explore 
 Unlike the built-in InStorage Memory provider, this implementation explicitly models EF Core’s internal pipeline — from IDbContextOptionsExtension registration, to custom query expressions, shaped query compilation, snapshot-based storage, and navigation fix-up — in order to expose and control each stage of execution.
 
 The goal of the project is to showcase architectural clarity, provider extensibility knowledge, and the ability to analyze and implement complex framework internals. It is intended as both a  technical showcase and a knowledge-sharing project.
+
 ### Motivation
+This project was built with four goals.
+
+First, to understand EF Core from the inside. Instead of using it only as an ORM, I wanted to explore how its query pipeline, tracking system, and provider model actually work.
+
+Second, to make EF Core’s internal architecture more transparent and accessible by open-sourcing a minimal custom provider implementation, allowing others to study, experiment with, and reason about how EF Core actually works under the hood.
+
+Third, to experiment with AI-assisted development on non-trivial infrastructure code, especially around expression trees and query compilation.
+
+Finally, to deepen my understanding of advanced C# and .NET concepts such as generics, reflection, metadata, and runtime expression compilation.
+
 ### Architecture Overview
 ### Supported Features
 ### Implement Process
