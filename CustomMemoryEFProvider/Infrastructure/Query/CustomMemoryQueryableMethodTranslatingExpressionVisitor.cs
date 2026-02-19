@@ -48,8 +48,9 @@ public sealed class CustomMemoryQueryableMethodTranslatingExpressionVisitor
     }
 
     /// <summary>
-    /// 这是 QueryRoot -> ShapedQuery 的起点。
-    /// 对于“整表扫描”而言：QueryExpression = CustomMemoryQueryExpression(entityType)
+    /// Entry point from QueryRoot to ShapedQuery.
+    /// For a full table scan:
+    /// QueryExpression = CustomMemoryQueryExpression(entityType)
     /// ShaperExpression = CustomMemoryEntityShaperExpression(entityType)
     /// </summary>
     protected override ShapedQueryExpression? CreateShapedQueryExpression(IEntityType entityType)
@@ -359,7 +360,7 @@ public sealed class CustomMemoryQueryableMethodTranslatingExpressionVisitor
         if (source.QueryExpression is not CustomMemoryQueryExpression q)
             return null;
 
-        // 记录 skip（不执行）
+        // record skip
         var q2 = q.AddStep(new SkipStep(count));
 
         return new ShapedQueryExpression(q2, source.ShaperExpression);
