@@ -12,10 +12,9 @@ internal static class IncludeRewriting
     public static LambdaExpression RewriteIncludeSelector(
         LambdaExpression selector,
         ParameterExpression queryContextParam,
-        Func<Expression, Expression> rewriteSubqueryToEnumerable // 只做 rewrite，不做 compile
+        Func<Expression, Expression> rewriteSubqueryToEnumerable
     )
     {
-        // ✅把外层 selector 的第一个参数（通常是 TransparentIdentifier 或实体）传进去
         var outerParam = selector.Parameters[0];
 
         var v = new IncludeSelectorRewriter(queryContextParam, outerParam, rewriteSubqueryToEnumerable);

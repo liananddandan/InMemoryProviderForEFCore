@@ -12,5 +12,6 @@ The goal of the project is to showcase architectural clarity, provider extensibi
  #### 2. [In-Memory Database Runtime](https://dev.to/alexleeeeeeeeee/net-learning-notes-custom-in-memory-provider2-in-memory-database-runtime-254p)
  #### 3. [Storage Write Model and Key-Based Retrieval](https://dev.to/alexleeeeeeeeee/net-learning-notes-custom-in-memory-provider3-storage-write-model-and-key-based-retrieval-1i7m)
  #### 4. [ReadPath - From IQueryable to Result Execution](https://dev.to/alexleeeeeeeeee/net-learning-notes-custom-in-memory-provider4-readpath-from-iqueryable-to-result-execution-f9l)
+ #### 5. [Include & ThenInclude — Navigation Loading and Fix-Up](https://dev.to/alexleeeeeeeeee/net-learning-notes-custom-in-memory-provider5-include-theninclude-navigation-loading-and-13ga)
 ### Testing Strategy
 ### Limitations

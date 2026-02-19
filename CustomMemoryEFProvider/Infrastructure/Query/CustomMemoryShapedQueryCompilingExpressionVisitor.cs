@@ -1712,8 +1712,8 @@ public sealed class CustomMemoryShapedQueryCompilingExpressionVisitor
                 && m.ReturnType.IsGenericType
                 && m.ReturnType.GetGenericTypeDefinition() == typeof(IMemoryTable<>));
 
-// Used by EntityQueryRootRewritingVisitor to replace ctx.Set<T>() roots:
-// it must return IQueryable<T> AND it must be QueryRows-based (to keep QueryCalled==0).
+    // Used by EntityQueryRootRewritingVisitor to replace ctx.Set<T>() roots:
+    // it must return IQueryable<T> AND it must be QueryRows-based (to keep QueryCalled==0).
     private Expression BuildQueryRowsEntityQueryable(Type clrType, Expression qcExpr, IEntityType efEntityType)
     {
         // 1) tableExpr = _db.GetTable<TEntity>(typeof(TEntity))
